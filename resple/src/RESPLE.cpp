@@ -17,16 +17,17 @@
 #include <mutex>
 #include <boost/make_shared.hpp>
 #include <rclcpp/service.hpp>
-#include <std_srvs/srv/empty.hpp>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/io/pcd_io.h>
 #include "livox_interfaces/msg/custom_msg.hpp"
 #include "livox_ros_driver/msg/custom_msg.hpp"
 #include "livox_ros_driver2/msg/custom_msg.hpp"
 #include "estimate_msgs/msg/calib.hpp"
 #include "estimate_msgs/msg/spline.hpp"
 #include "estimate_msgs/msg/estimate.hpp"
+#include "estimate_msgs/srv/save_map.hpp"
 #include "Estimator.h"
 
 KD_TREE<pcl::PointXYZINormal> ikdtree;
@@ -92,6 +93,8 @@ public:
                         lidar.topic, 200000, std::bind(&RESPLE::livoxMid360Callback, this, std::placeholders::_1));
             }
         }
+        srv_save_map = nh->create_service<estimate_msgs::srv::SaveMap>("save_map",
+            std::bind(&RESPLE::savePCDCallback, this, std::placeholders::_1, std::placeholders::_2));
         logStartupInfo(nh);
     }
 
@@ -207,6 +210,9 @@ public:
 private:
 
     std::string node_name = "RESPLE";
+    rclcpp::Service<estimate_msgs::srv::SaveMap>::SharedPtr srv_save_map;
+    std::string pcd_save_path;
+    std::mutex mtx_map;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_ouster;
     rclcpp::Subscription<livox_ros_driver::msg::CustomMsg>::SharedPtr sub_livox;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_livox2;
@@ -330,6 +336,7 @@ private:
         NUM_MATCH_POINTS = CommonUtils::readParam<int>(nh, "mapping.num_nn", 5);
         double lidar_time_offset = CommonUtils::readParam<double>(nh, "lidar.time_offset", 0.0);
         time_offset = 1e9*lidar_time_offset;
+        pcd_save_path = CommonUtils::readParam<std::string>(nh, "mapping.pcd_save_path", std::string("/tmp/resple_map.pcd"));
     }
 
     // RCLCPP_INFO (not std::cout): under ros2 launch, this node's raw stdout does not
@@ -909,9 +916,10 @@ private:
         LocalMap_Points = New_LocalMap_Points;
 
         if(cub_needrm.size() > 0) {
+            std::lock_guard<std::mutex> lock(mtx_map);
             ikdtree.Delete_Point_Boxes(cub_needrm);
         }
-    }    
+    }
 
     void mapIncremental()
     {
@@ -945,8 +953,31 @@ private:
                 PointNoNeedDownsample.emplace_back(point);
             }
         }
+        std::lock_guard<std::mutex> lock(mtx_map);
         ikdtree.Add_Points(PointToAdd, true);
         ikdtree.Add_Points(PointNoNeedDownsample, false);
+    }
+
+    void savePCDCallback(const std::shared_ptr<estimate_msgs::srv::SaveMap::Request> request,
+                         std::shared_ptr<estimate_msgs::srv::SaveMap::Response> response)
+    {
+        const std::string& save_path = request->path.empty() ? pcd_save_path : request->path;
+        Eigen::aligned_vector<pcl::PointXYZINormal> map_points;
+        {
+            std::lock_guard<std::mutex> lock(mtx_map);
+            ikdtree.flatten(ikdtree.Root_Node, map_points, NOT_RECORD);
+        }
+        pcl::PointCloud<pcl::PointXYZINormal> map_cloud;
+        map_cloud.points = map_points;
+        map_cloud.width = map_cloud.points.size();
+        map_cloud.height = 1;
+        map_cloud.is_dense = true;
+        int ret = pcl::io::savePCDFileBinary(save_path, map_cloud);
+        response->success = (ret == 0);
+        response->message = response->success
+            ? "Saved map to " + save_path + " (" + std::to_string(map_cloud.size()) + " points)"
+            : "Failed to save map to " + save_path;
+        RCLCPP_INFO(rclcpp::get_logger(node_name), "%s", response->message.c_str());
     }
 
 };

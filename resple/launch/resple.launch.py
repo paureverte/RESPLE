@@ -10,6 +10,7 @@ def launch_setup(context, *args, **kwargs):
     config_name = LaunchConfiguration('config').perform(context)
     publish_static_tf = LaunchConfiguration('publish_static_tf').perform(context).lower() == 'true'
     use_rviz = LaunchConfiguration('rviz').perform(context).lower() == 'true'
+    use_map_saving = LaunchConfiguration('map_saving').perform(context).lower() == 'true'
 
     config_yaml_fusion = os.path.join(
         get_package_share_directory('resple'), 'config', f'config_{config_name}.yaml')
@@ -52,6 +53,16 @@ def launch_setup(context, *args, **kwargs):
             output='log',
             arguments=['0', '0', '0', '0', '0', '0', 'map', 'my_frame', '--ros-args', '--log-level', 'INFO']))
 
+    if use_map_saving:
+        nodes.append(Node(
+            package='resple',
+            executable='MapSaving',
+            name='MapSaving',
+            emulate_tty=True,
+            output='log',
+            parameters=[config_yaml_fusion],
+            arguments=['--ros-args', '--log-level', 'INFO']))
+
     return nodes
 
 
@@ -66,5 +77,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'rviz', default_value='true',
             description='If true, also launch rviz2 with config/config.rviz'),
+        DeclareLaunchArgument(
+            'map_saving', default_value='true',
+            description='If true, also launch the MapSaving node, which accumulates everything published on '
+                        '"global_map" and exposes it via the /save_global_map service'),
         OpaqueFunction(function=launch_setup),
     ])

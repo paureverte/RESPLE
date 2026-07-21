@@ -40,6 +40,7 @@ include_directories(
 	${PCL_INCLUDE_DIRS})
 add_executable(Mapping src/Mapping.cpp)
 add_executable(RESPLE src/RESPLE.cpp include/ikd-Tree/ikd_Tree.cpp)
+add_executable(MapSaving src/MapSaving.cpp)
 	ament_target_dependencies(${PROJECT_NAME} 
 	rclcpp
 	std_msgs
@@ -67,6 +68,15 @@ target_link_libraries(Mapping
 		${PCL_LIBRARIES}
 		${YAML_CPP_LIBRARIES}
 )
+ament_target_dependencies(MapSaving
+	rclcpp
+	sensor_msgs
+	estimate_msgs
+	pcl_conversions
+)
+target_link_libraries(MapSaving
+		${PCL_LIBRARIES}
+)
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY config
@@ -74,6 +84,8 @@ install(DIRECTORY config
 install(TARGETS RESPLE
   DESTINATION lib/${PROJECT_NAME})
 install(TARGETS Mapping
+  DESTINATION lib/${PROJECT_NAME})
+install(TARGETS MapSaving
   DESTINATION lib/${PROJECT_NAME})
 ament_export_dependencies(rclcpp yaml-cpp message_runtime livox_ros_driver livox_ros_driver2 livox_interfaces)
 ament_export_libraries(${PROJECT_NAME})

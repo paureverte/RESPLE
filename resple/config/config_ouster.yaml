@@ -46,3 +46,6 @@
       num_nn: 5                  # nearest neighbors used for local plane fitting
       cube_len: 2000.0           # local map cube size, unit: m
       num_points_upd: 500        # max LiDAR points per IEKF update batch
+      ds_map_voxel: 0.5          # voxel size for the accumulated global_map, unit: m
+      pcd_save_path: "/tmp/resple_map_ouster.pcd"               # output of the RESPLE /save_map service
+      global_pcd_save_path: "/tmp/resple_global_map_ouster.pcd" # output of the MapSaving /save_global_map service

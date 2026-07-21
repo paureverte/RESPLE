@@ -3,7 +3,6 @@
 
 --> [Branch for benchmarking](https://github.com/ASIG-X/RESPLE/tree/feature/benchmark)
 ### News
-* 2026-06: A new feature is now available to save maps as `.pcd` files. The `RESPLE` node exposes a `save_map` service to save the ikd-tree map on demand. A new `MapSaving` node is also available to accumulate and save the dense global map published by the `Mapping` node. Please check out the branch [here](https://github.com/ASIG-X/RESPLE/tree/feature/save_map).
 * 2026-01: A new feature is now available to save estimated trajectories specifically for benchmarking. Please check out the branch [here](https://github.com/ASIG-X/RESPLE/tree/feature/benchmark). An example using the HelmDyn dataset can be found [here](https://github.com/ASIG-X/RESPLE/blob/feature/benchmark/resple/config/config_helmdyn01.yaml). The estimated trajectory will be generated through spline interpolation at ground-truth timestamps in a `.txt` file following the [TUM format](https://github.com/MichaelGrupp/evo/wiki/Formats).
 * 2025-12: The design of a handheld demostrator for RESPLE is now publicly available. Check out our web page [here](https://asig-x.github.io/resple_demonstrator/).
 * 2025-12: Additional evaluation results of RESPLE-LIO and corresponding parameter sets on the [Newer College](https://ori-drs.github.io/newer-college-dataset/) dataset (including its extension) and the [MCD](https://mcdviral.github.io/) dataset are now available on our [web page](https://asig-x.github.io/resple_web/add_evaluation.html). Instructions for testing are given below.
@@ -133,6 +132,37 @@ wheel_odometry:
 
   max_allowed_residual_vx: 0.5           # residual (m/s) above which the update is treated as wheel slip
   adaptive_covariance_multiplier: 100.0  # covariance inflation applied when slip is detected
+```
+
+## Map Saving
+
+Both save services are `estimate_msgs/srv/SaveMap` (`string path` request, `bool success` + `string message` response) — pass an absolute `path` to save exactly there for that call, or omit it (empty string) to fall back to the path configured in the yaml.
+
+**Option 1 — save RESPLE's local map**
+
+The `RESPLE` node exposes a `/save_map` service that saves the current ikd-tree map (bounded by `mapping.cube_len` — older points get evicted as the sensor moves away) directly to disk:
+```bash
+ros2 service call /save_map estimate_msgs/srv/SaveMap "{path: '/home/user/maps/my_map.pcd'}"
+# or, to use the configured default path instead:
+ros2 service call /save_map estimate_msgs/srv/SaveMap "{}"
+```
+Default path (used when `path` is empty) is `/tmp/resple_map.pcd`, overridable per config via `mapping.pcd_save_path`.
+
+**Option 2 — accumulate and save the full-session dense map**
+
+Launch with `map_saving:=true` to also start the `MapSaving` node, which subscribes to `global_map` (published by `Mapping`) and accumulates every scan into one unbounded dense map for the whole session:
+```bash
+ros2 launch resple resple.launch.py config:=<name> map_saving:=true
+# whenever you want to save it:
+ros2 service call /save_global_map estimate_msgs/srv/SaveMap "{path: '/home/user/maps/session_map.pcd'}"
+```
+Default path (used when `path` is empty) is `/tmp/resple_global_map.pcd`, overridable per config via `mapping.global_pcd_save_path`.
+
+`mapping.ds_map_voxel` controls the voxel size (m) each scan is downsampled to before being added to `global_map`/the accumulated map — independent of `mapping.ds_lm_voxel`, which only affects RESPLE's own local ikd-tree.
+
+To view a saved `.pcd` file:
+```bash
+pcl_viewer /path/to/output.pcd
 ```
 
 ## Docker Usage
