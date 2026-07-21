@@ -31,11 +31,11 @@ These four variants have been tested in real-world datasets and our own experime
 }
 ``` 
 ### Dependencies
-Tested with [ROS2 Humble](https://docs.ros.org/en/humble/Installation.html) on Ubuntu 22.04
+Tested with [ROS2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html) on Ubuntu 24.04
 ```
 sudo apt install libomp-dev libpcl-dev libeigen3-dev
-sudo apt install ros-humble-pcl*
-# Optional: sudo apt install ros-humble-rosbag2-storage-mcap (for playing .mcap file if testing GrandTour dataset)
+sudo apt install ros-jazzy-pcl*
+# Optional: sudo apt install ros-jazzy-rosbag2-storage-mcap (for playing .mcap file if testing GrandTour dataset)
 ```
 
 
@@ -49,14 +49,16 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --package
 
 ## Docker Build
 
-To build a docker image capable of running the examples and dataset:
+A ready-to-use ROS2 Jazzy development image is provided under `docker/`:
 
 ```bash
 cd ~/path/to/src
 git clone --recursive https://github.com/ASIG-X/RESPLE.git
-cd RESPLE
-docker build --ssh default --tag resple .
+cd RESPLE/docker
+./build.sh
 ```
+
+This builds the `resple:jazzy` image (pass `./build.sh --no-cache` to force a clean rebuild).
 
 ## Own experimental datasets ([LINK to SURFdrive](https://surfdrive.surf.nl/files/index.php/s/lfXfApqVXTLIS9l)) 
 Password: RESPLE2025
@@ -86,144 +88,89 @@ Password: RESPLE2025
 
 **Please refer to our [dataset website](https://asig-x.github.io/resple_web/datasets.html) for more information.**
 ## Usage
-For LIO use, change `if_lidar_only` in `resple/config/config_xxx.yaml` to `false`. 
-
-* [HelmDyn](https://surfdrive.surf.nl/files/index.php/s/lfXfApqVXTLIS9l) dataset (Livox Mid360)
+Every dataset/sensor setup is launched through the same generic launch file:
 ```
 source install/setup.bash
-ros2 launch resple resple_helmdyn01.launch.py
+ros2 launch resple resple.launch.py config:=<name>
 # Open another terminal and run
 source install/setup.bash
 ros2 bag play /path/to/bag/
 ```
-* [R-Campus](https://surfdrive.surf.nl/files/index.php/s/lfXfApqVXTLIS9l) dataset (Livox Avia)
+Optional launch arguments:
+* `rviz:=false` — skip launching RViz (default `true`)
+* `publish_static_tf:=true` — also publish an identity `map`->`my_frame` static transform, for configs with no map-frame source of their own (default `false`)
 
-```
-source install/setup.bash
-ros2 launch resple resple_r_campus.launch.py
-# Open another terminal and run
-source install/setup.bash
-ros2 bag play /path/to/bag/
-```
-* [TudoRun](https://surfdrive.surf.nl/files/index.php/s/lfXfApqVXTLIS9l) dataset (Livox Mid360)
+Available `<name>` values, each backed by `resple/config/config_<name>.yaml`:
 
-```
-source install/setup.bash
-ros2 launch resple resple_tudorun01.launch.py
-# Open another terminal and run
-source install/setup.bash
-ros2 bag play /path/to/bag/
-```
+| `config:=` | Sensors | Mode |
+|---|---|---|
+| `hap360` | Livox HAP360 + IMU | LiDAR-Inertial |
+| `hap360_lidaronly` | Livox HAP360 | LiDAR-only |
+| `mid360` | Livox Mid360 (PointCloud2) + IMU | LiDAR-Inertial |
+| `mid360_hesai_lidaronly` | Livox Mid360 + Hesai | LiDAR-only, multi-LiDAR |
+| `ouster` | Ouster + IMU | LiDAR-Inertial |
+| `ouster_lidaronly` | Ouster | LiDAR-only |
 
-* [NTU VIRAL](https://ntu-aris.github.io/ntu_viral_dataset/) dataset (OUSTER OS1-16)
-```
-source install/setup.bash
-ros2 launch resple resple_eee_02.launch.py
-# Open another terminal and run
-source install/setup.bash
-ros2 bag play /path/to/bag/
-```
+Each `config_<name>.yaml` is commented inline and grouped into `imu:`, `lidar:`, `spline:`, `mapping:` and `wheel_odometry:` sections. Copy the closest one as a starting point for your own sensor setup, and toggle `if_lidar_only` to switch between LiDAR-only and LiDAR-Inertial for a given sensor.
 
-* [MCD](https://mcdviral.github.io/) dataset (Livox Mid70)
-```
-source install/setup.bash
-ros2 launch resple resple_ntu_day_01_livox.launch.py
-# Open another terminal and run
-source install/setup.bash
-ros2 bag play /path/to/bag/
-```
-  
-* [GrandTour](https://grand-tour.leggedrobotics.com/) dataset (Hesai XT32, Livox Mid360)
-```
-source install/setup.bash
-ros2 launch resple resple_heap_testsite_hoenggerberg.launch.py
-# ros2 launch resple resple_jungfraujoch_tunnel_small.launch.py
-# Open another terminal and run
-source install/setup.bash
-ros2 bag play /path/to/hesai_livox_ap20_converted.mcap
+## Wheel Odometry
+RESPLE can optionally fuse wheel/velocity odometry as a tightly-coupled IEKF factor, evaluated analytically against the B-spline's continuous linear and angular velocity, with adaptive covariance inflation to reject wheel slip. It is disabled by default; enable it per-config under `wheel_odometry:` (see `config_hap360.yaml` or `config_mid360.yaml` for the full commented template):
+
+```yaml
+wheel_odometry:
+  enable: true
+  topic_name: "/wheel_odom"
+  topic_type: "nav_msgs/msg/Odometry"    # or "geometry_msgs/msg/TwistStamped"
+  use_only_vx: true                      # restrict the update to the forward-velocity axis
+
+  # Extrinsic from IMU/base (B) to the wheel-odometry frame (O), same convention as LiDAR's q_lb/t_lb
+  q_wb: [1.0, 0.0, 0.0, 0.0]
+  t_wb: [0.0, 0.0, 0.0]
+
+  std_vx: 0.05
+  std_vy: 0.02
+  std_vz: 0.02
+
+  max_allowed_residual_vx: 0.5           # residual (m/s) above which the update is treated as wheel slip
+  adaptive_covariance_multiplier: 100.0  # covariance inflation applied when slip is detected
 ```
 
-* [Newer College](https://ori-drs.github.io/newer-college-dataset/stereo-cam/) (OUSTER OS1-64)
-```
-source install/setup.bash
-ros2 launch resple resple_nc_short.launch.py
-# Open another terminal and run
-source install/setup.bash
-ros2 bag play /path/to/bag/
-```
+## Docker Usage
 
-* [Extension to Newer College](https://ori-drs.github.io/newer-college-dataset/multi-cam/) (OUSTER OS0-128)
-```
-source install/setup.bash
-ros2 launch resple resple_nce_quad.launch.py # for outdoor sequences
-# ros2 launch resple resple_nce_stairs.launch.py # for indoor sequences Stairs and Mine-*
-# Open another terminal and run
-source install/setup.bash
-ros2 bag play /path/to/bag/
-```
-
-* [MCD](https://mcdviral.github.io/) dataset (OUSTER OS1-64-VN200 or OS1-128-VN100)
-```
-source install/setup.bash
-ros2 launch resple resple_ntu_day_01_ouster.launch.py # for sequences ntu_*
-# ros2 launch resple resple_kth_day_06_ouster.launch.py # for sequences kth_* and tuhh_*
-# Open another terminal and run
-source install/setup.bash
-ros2 bag play /path/to/bag/
-```
-
-### Docker
-
-With the docker image built (see docker build instructions), one can run the run the algorithm in a docker container by following these steps.
+With the image built (see Docker Build above), run the algorithm in a docker container via `docker compose`.
 
 Allow the docker user to generate graphics:
 ```bash
 xhost +local:docker
 ```
 
-Replacing `/path/to/data` with the location of the datasets, run the container (with mounted source code for development):
+From `docker/`, start the container in the background (the repo root is mounted at `~/workspace/src/RESPLE`, and `build/`, `install/`, `log/` are mounted for development so they persist outside the container):
 ```bash
-docker run -it -e DISPLAY=$DISPLAY \
-  -v .:/root/ros2_ws/src/RESPLE \
-  -v /tmp/.X11-unix/:/tmp/.X11-unix/ \
-  -v ~/data/resple_dataset/:/root/data/resple_dataset \
-  -v ~/data/grand_tour_box/datasets:/root/data/grand_tour_box/datasets \
-  --name resple resple
-```
-Note: To recompile inside the docker container run `colcon build --packages-up-to resple`. If no development is intended, then one can omit `-v .:/root/ros2_ws/src/RESPLE`.
-
-Replacing `<filename>` with the launch file from above, launch with:
-```bash
-ros2 launch resple <filename>.launch.py
+cd docker
+docker compose up -d
+docker exec -it resple_jazzy bash
 ```
 
-Create a second terminal attached to the container with:
+Inside the container, build the workspace with the `cb` alias (set up in `~/.bashrc`):
 ```bash
-docker exec -it resple bash
+cb   # colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release && source install/setup.bash
 ```
 
-In this second container, replacing `<example>/<filename>` to make a valid bag filepath, play the dataset:
+Launch, replacing `<name>` with one of the configs from Usage above:
 ```bash
-ros2 bag play ~/data/resple_dataset/<example>/
+ros2 launch resple resple.launch.py config:=<name>
 ```
 
-If the container is already run, then:
-* It can be removed with:
+Open a second terminal attached to the same running container and play a bag:
 ```bash
-docker rm resple
+docker exec -it resple_jazzy bash
+ros2 bag play /path/to/bag/
 ```
-* It can be started with:
-```bash
-docker start resple
-```
-* It can be be attached to with:
-```bash
-docker attach resple
-```
-* It can be stopped with:
-```bash
-docker stop resple
-```
+
+Manage the container from `docker/`:
+* `docker compose stop` — stop it
+* `docker compose up -d` — start it again
+* `docker compose down` — remove it
 
 ## Contributors
 Ziyu Cao (Email: ziyu.cao@liu.se)
@@ -231,6 +178,8 @@ Ziyu Cao (Email: ziyu.cao@liu.se)
 William Talbot (Email: wtalbot@ethz.ch)
 
 Kailai Li (Email: kailai.li@rug.nl)
+
+Pau Reverté (Email: pau.reverte@eurecat.org)
 
 ## Credits
 Thanks for [SFUISE](https://github.com/ASIG-X/SFUISE), [ikd-Tree](https://github.com/hku-mars/ikd-Tree), [FAST-LIO](https://github.com/hku-mars/FAST_LIO), [Livox-SDK](https://github.com/Livox-SDK), and [basalt](https://gitlab.com/VladyslavUsenko/basalt).
