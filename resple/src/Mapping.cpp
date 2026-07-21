@@ -358,19 +358,19 @@ class HesaiBuff : public MappingBase<pcl::PointXYZINormal>
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_subscription_hesai;
 };
 
-class Mid360BoxiBuff : public MappingBase<pcl::PointXYZINormal>
+class Mid360Buff : public MappingBase<pcl::PointXYZINormal>
 {
   public:
-  Mid360BoxiBuff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
+  Mid360Buff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
     {
         pc_subscription_mid360 = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
-            this->lidar.topic, 100, std::bind(&Mid360BoxiBuff::mid360BoxiCallback, this, std::placeholders::_1));
+            this->lidar.topic, 100, std::bind(&Mid360Buff::mid360Callback, this, std::placeholders::_1));
     }
 
-    void mid360BoxiCallback(const sensor_msgs::msg::PointCloud2::SharedPtr livox_msg_in)
+    void mid360Callback(const sensor_msgs::msg::PointCloud2::SharedPtr livox_msg_in)
     {
         this->pc_last->clear();
-        pcl::PointCloud<livox_mid360_boxi::Point>::Ptr pc_last_livox(new pcl::PointCloud<livox_mid360_boxi::Point>());
+        pcl::PointCloud<livox_mid360::Point>::Ptr pc_last_livox(new pcl::PointCloud<livox_mid360::Point>());
         pcl::fromROSMsg(*livox_msg_in, *pc_last_livox);
         size_t plsize = pc_last_livox->size();
         if (plsize == 0) return;
@@ -621,8 +621,8 @@ int main(int argc, char** argv) {
             buffs.push_back(new AviaRespleBuff(nh, lidar));
         } else if (!lidar.type.compare("Hesai")) {
             buffs.push_back(new HesaiBuff(nh, lidar));
-        } else if (!lidar.type.compare("Mid360Boxi")) {
-            buffs.push_back(new Mid360BoxiBuff(nh, lidar));
+        } else if (!lidar.type.compare("Mid360")) {
+            buffs.push_back(new Mid360Buff(nh, lidar));
         } else {
             exit(1);
         }

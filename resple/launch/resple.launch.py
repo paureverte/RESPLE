@@ -33,7 +33,7 @@ def launch_setup(context, *args, **kwargs):
             emulate_tty=True,
             output='log',
             parameters=[config_yaml_fusion],
-            arguments=['--ros-args', '--log-level', 'warn']),
+            arguments=['--ros-args', '--log-level', 'INFO']),
         Node(
             package='resple',
             executable='Mapping',
@@ -41,7 +41,7 @@ def launch_setup(context, *args, **kwargs):
             emulate_tty=True,
             output='log',
             parameters=[config_yaml_fusion],
-            arguments=['--ros-args', '--log-level', 'warn']),
+            arguments=['--ros-args', '--log-level', 'INFO']),
     ]
 
     if publish_static_tf:
@@ -50,7 +50,7 @@ def launch_setup(context, *args, **kwargs):
             executable='static_transform_publisher',
             name='static_transform_publisher',
             output='log',
-            arguments=['0', '0', '0', '0', '0', '0', 'map', 'my_frame', '--ros-args', '--log-level', 'WARN']))
+            arguments=['0', '0', '0', '0', '0', '0', 'map', 'my_frame', '--ros-args', '--log-level', 'INFO']))
 
     return nodes
 

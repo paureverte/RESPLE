@@ -83,7 +83,7 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(hesai_ros::Point,
     (double, timestamp, timestamp)
 )
 
-namespace livox_mid360_boxi {
+namespace livox_mid360 {
     struct EIGEN_ALIGN16 Point {
       PCL_ADD_POINT4D;
       float intensity;
@@ -93,7 +93,7 @@ namespace livox_mid360_boxi {
       EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     };
   }
-  POINT_CLOUD_REGISTER_POINT_STRUCT(livox_mid360_boxi::Point,
+  POINT_CLOUD_REGISTER_POINT_STRUCT(livox_mid360::Point,
       (float, x, x)
       (float, y, y)
       (float, z, z)

@@ -19,7 +19,7 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ~/.Xauthority:/home/user/.Xauthority:rw
       # Datasets
-      - ../../datasets:/home/user/workspace/datasets:rw
+      - ../../../datasets:/home/user/workspace/datasets:rw
 
     devices:
       - /dev/bus/usb:/dev/bus/usb

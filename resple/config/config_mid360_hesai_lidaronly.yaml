@@ -17,7 +17,7 @@
       time_offset: 0.0           # time offset between lidar and IMU, unit: s
       livox:
         topic_lidar: /gt_box/livox/lidar
-        lidar_type: Mid360Boxi
+        lidar_type: Mid360
         scan_line: 4
         blind: 0.5                                              # min valid range, unit: m
         q_lb: [0.999976, 0.000002, 0.000670, 0.006906]          # IMU->LiDAR extrinsic rotation (w, x, y, z)

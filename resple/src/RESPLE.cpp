@@ -87,12 +87,12 @@ public:
             } else if (!lidar.type.compare("Hesai")) {
                 sub_hesai = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
                         lidar.topic, 200000, std::bind(&RESPLE::hesaiLidarCallback, this, std::placeholders::_1));
-            } else if (!lidar.type.compare("Mid360Boxi")) {
-                sub_livox_mid360_boxi = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
-                        lidar.topic, 200000, std::bind(&RESPLE::livoxMid360BoxiCallback, this, std::placeholders::_1));
+            } else if (!lidar.type.compare("Mid360")) {
+                sub_livox_mid360 = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
+                        lidar.topic, 200000, std::bind(&RESPLE::livoxMid360Callback, this, std::placeholders::_1));
             }
         }
-        logStartupInfo();
+        logStartupInfo(nh);
     }
 
     void processData()
@@ -212,7 +212,7 @@ private:
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_livox2;
     rclcpp::Subscription<livox_interfaces::msg::CustomMsg>::SharedPtr sub_livox_avia;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_hesai;
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_livox_mid360_boxi;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_livox_mid360;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cur_scan;
     rclcpp::Publisher<estimate_msgs::msg::Estimate>::SharedPtr pub_est;
     rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr pub_start_time;
@@ -332,29 +332,30 @@ private:
         time_offset = 1e9*lidar_time_offset;
     }
 
-    // Uses std::cout rather than RCLCPP_INFO: the launch file runs this node at
-    // --log-level warn, which would silently swallow an RCLCPP_INFO startup banner.
-    void logStartupInfo()
+    // RCLCPP_INFO (not std::cout): under ros2 launch, this node's raw stdout does not
+    // reliably reach the console, but ROS logging does. Visible whenever this node's
+    // log level is INFO or more verbose (the launch file's --log-level argument).
+    void logStartupInfo(rclcpp::Node::SharedPtr& nh)
     {
-        std::cout << "========== RESPLE initializing ==========" << std::endl;
-        std::cout << "Mode: " << (if_lidar_only ? "LiDAR-only" : "LiDAR-Inertial") << std::endl;
+        RCLCPP_INFO_STREAM(nh->get_logger(), "========== RESPLE initializing ==========");
+        RCLCPP_INFO_STREAM(nh->get_logger(), "Mode: " << (if_lidar_only ? "LiDAR-only" : "LiDAR-Inertial"));
         if (!if_lidar_only) {
-            std::cout << "IMU topic: " << sub_imu->get_topic_name() << std::endl;
+            RCLCPP_INFO_STREAM(nh->get_logger(), "IMU topic: " << sub_imu->get_topic_name());
         }
-        std::cout << "Spline knot rate: " << (1000000000LL / dt_ns) << " Hz" << std::endl;
-        std::cout << "LiDAR sensors (" << lidars.size() << "):" << std::endl;
+        RCLCPP_INFO_STREAM(nh->get_logger(), "Spline knot rate: " << (1000000000LL / dt_ns) << " Hz");
+        RCLCPP_INFO_STREAM(nh->get_logger(), "LiDAR sensors (" << lidars.size() << "):");
         for (const auto& [name, lidar] : lidars) {
-            std::cout << "  - " << name << ": type=" << lidar.type << " topic=" << lidar.topic
-                       << " scan_line=" << lidar.scan_line << " blind=" << lidar.blind << "m" << std::endl;
+            RCLCPP_INFO_STREAM(nh->get_logger(), "  - " << name << ": type=" << lidar.type << " topic=" << lidar.topic
+                       << " scan_line=" << lidar.scan_line << " blind=" << lidar.blind << "m");
         }
         if (wheel_cfg.enable) {
-            std::cout << "Wheel odometry: enabled, topic=" << wheel_cfg.topic << " (" << wheel_cfg.topic_type
-                       << "), use_only_vx=" << (wheel_cfg.use_only_vx ? "true" : "false") << std::endl;
+            RCLCPP_INFO_STREAM(nh->get_logger(), "Wheel odometry: enabled, topic=" << wheel_cfg.topic << " (" << wheel_cfg.topic_type
+                       << "), use_only_vx=" << (wheel_cfg.use_only_vx ? "true" : "false"));
         } else {
-            std::cout << "Wheel odometry: disabled" << std::endl;
+            RCLCPP_INFO_STREAM(nh->get_logger(), "Wheel odometry: disabled");
         }
-        std::cout << "Local map: cube_len=" << cube_len << "m ds_lm_voxel=" << ds_lm_voxel << "m" << std::endl;
-        std::cout << "==========================================" << std::endl;
+        RCLCPP_INFO_STREAM(nh->get_logger(), "Local map: cube_len=" << cube_len << "m ds_lm_voxel=" << ds_lm_voxel << "m");
+        RCLCPP_INFO_STREAM(nh->get_logger(), "==========================================");
     }
 
     void initFilter(int64_t start_t_ns, Eigen::Vector3d t_init = Eigen::Vector3d::Zero(), Eigen::Quaterniond q_init = Eigen::Quaterniond::Identity())
@@ -629,12 +630,12 @@ private:
         last_t_ns = time_begin + max_ofs_ns;
 	}     
 
-    void livoxMid360BoxiCallback(const sensor_msgs::msg::PointCloud2::SharedPtr livox_msg_in)
+    void livoxMid360Callback(const sensor_msgs::msg::PointCloud2::SharedPtr livox_msg_in)
 	{
-        std::string name = "Mid360Boxi";
-        const LidarConfig& lidar = lidars.at(name);   
-        pcl::PointCloud<pcl::PointXYZINormal>::Ptr pc_last(new pcl::PointCloud<pcl::PointXYZINormal>());     
-        pcl::PointCloud<livox_mid360_boxi::Point>::Ptr pc_last_livox(new pcl::PointCloud<livox_mid360_boxi::Point>());
+        std::string name = "Mid360";
+        const LidarConfig& lidar = lidars.at(name);
+        pcl::PointCloud<pcl::PointXYZINormal>::Ptr pc_last(new pcl::PointCloud<pcl::PointXYZINormal>());
+        pcl::PointCloud<livox_mid360::Point>::Ptr pc_last_livox(new pcl::PointCloud<livox_mid360::Point>());
         pcl::fromROSMsg(*livox_msg_in, *pc_last_livox);
         size_t plsize = pc_last_livox->size();
         if (plsize == 0) return;
