@@ -6,6 +6,9 @@ build/
 install/
 log/
 
+## Claude
+.claude/
+
 ## Core latex/pdflatex auxiliary files:
 *.aux
 *.lof

@@ -1,94 +1,101 @@
 # RESPLE: Recursive Spline Estimation for LiDAR-Based Odometry
 [**YouTube**](https://youtu.be/3-xLRRT25ys) | **[arXiv](https://arxiv.org/abs/2504.11580)** | **[Website](https://asig-x.github.io/resple_web/)** | **[IEEE RA-L](https://doi.org/10.1109/LRA.2025.3604758)** | **[Demonstrator](https://asig-x.github.io/resple_demonstrator/)**
 
---> [Branch for benchmarking](https://github.com/ASIG-X/RESPLE/tree/feature/benchmark)
-### News
-* 2026-01: A new feature is now available to save estimated trajectories specifically for benchmarking. Please check out the branch [here](https://github.com/ASIG-X/RESPLE/tree/feature/benchmark). An example using the HelmDyn dataset can be found [here](https://github.com/ASIG-X/RESPLE/blob/feature/benchmark/resple/config/config_helmdyn01.yaml). The estimated trajectory will be generated through spline interpolation at ground-truth timestamps in a `.txt` file following the [TUM format](https://github.com/MichaelGrupp/evo/wiki/Formats).
-* 2025-12: The design of a handheld demostrator for RESPLE is now publicly available. Check out our web page [here](https://asig-x.github.io/resple_demonstrator/).
-* 2025-12: Additional evaluation results of RESPLE-LIO and corresponding parameter sets on the [Newer College](https://ori-drs.github.io/newer-college-dataset/) dataset (including its extension) and the [MCD](https://mcdviral.github.io/) dataset are now available on our [web page](https://asig-x.github.io/resple_web/add_evaluation.html). Instructions for testing are given below.
-* 2025-09: The [TudoRun](https://asig-x.github.io/resple_web/datasets.html) dataset is released as a supplementary dataset.
+## What is RESPLE?
 
+RESPLE is a continuous-time state estimator for 6-DoF pose (position + orientation), used here as the backbone for a family of direct LiDAR-based odometry systems: LiDAR-only (LO), LiDAR-Inertial (LIO), and their multi-LiDAR variants (MLO/MLIO). This fork additionally fuses tightly-coupled wheel/velocity odometry.
 
-This is the offcial repository for RESPLE, the first B-spline-based recursive state estimation framework for estimating 6-DoF dynamic motions. Using RESPLE as the estimation backbone, we developed a unified suite of direct LiDAR-based odometry systems, including:
-* LiDAR-only odometry (LO)
-* LiDAR-inertial odometry (LIO)
-* Multi-LiDAR odometry (MLO)
-* Multi-LiDAR-inertial Odometry (MLIO)
+### Continuous-time trajectory as a B-spline
 
-These four variants have been tested in real-world datasets and our own experiments, covering aerial, wheeled, legged, and wearable platforms operating in indoor, urban, wild environments with diverse LiDAR types. We look forward to your comments and feedback! 
+Instead of representing the trajectory as a sequence of discrete poses — one per sensor measurement, as in most discrete-time filters or pose-graph optimizers — RESPLE represents it as a uniform cubic B-spline over SE(3): a small, fixed number of active control points (a translation and a local orientation increment each) that continuously parameterize position and orientation over a sliding time window. Any sensor measurement can then be related to the trajectory by evaluating the spline — and its analytic derivatives — at that measurement's *exact* timestamp. There is no per-scan or per-message discretization, and no explicit deskewing step: asynchronous, multi-rate sensors (LiDAR points arriving continuously, IMU at high rate, wheel odometry at yet another rate) are all handled the same way, by querying the same continuous trajectory at each one's own timestamp.
 
-### BibTex Citation
-```
-@ARTICLE{cao2025resple,
-  author={Cao, Ziyu and Talbot, William and Li, Kailai},
-  title={RESPLE: Recursive Spline Estimation for LiDAR-Based Odometry}, 
-  journal={IEEE Robotics and Automation Letters},
-  volume={10},
-  number={10},
-  pages={10666-10673},
-  year={2025}
-}
-``` 
-### Dependencies
+### Recursive estimation (IEKF)
+
+The 4 active control points of the spline are corrected online with an Iterated Extended Kalman Filter (IEKF): each new batch of measurements produces a residual and an analytic Jacobian *with respect to the spline control points* (derived from the spline's own basis functions), which are stacked and solved as a single batch update. As the sliding window advances, the oldest control point is retired and a new one added under a constant-velocity motion prior, and its associated process noise is propagated through the filter's covariance.
+
+### Sensor factors
+
+- **LiDAR** (point-to-plane): for each raw point, RESPLE queries the spline for the pose at that point's exact capture time, transforms it into the world frame using the LiDAR's extrinsic calibration, finds its nearest neighbors in an incremental kd-tree (`ikd-Tree`) local map, fits a local plane, and uses the signed point-to-plane distance as the residual.
+- **IMU** (accelerometer + gyroscope): the spline's own analytic 2nd derivative (linear acceleration) and angular velocity are compared directly against raw IMU readings — no separate integration step. In LIO mode, accelerometer and gyroscope biases are also estimated as part of the filter state.
+- **Wheel/velocity odometry** (optional, tightly-coupled — see [Wheel Odometry](#wheel-odometry) below): the spline's analytic linear and angular velocity are compared against wheel-reported velocity, with adaptive covariance inflation to reject wheel slip.
+
+### Nodes
+
+Two ROS2 nodes make up the pipeline:
+- **`RESPLE`** — runs the estimator itself: ingests LiDAR/IMU/wheel-odometry, maintains the local ikd-tree map used for LiDAR association, and publishes the current spline window.
+- **`Mapping`** — consumes the spline window, builds the downsampled global map, publishes the trajectory/odometry, and broadcasts the TF tree (`world`, `body`, per-LiDAR frames, and an optional `target_link`/`odom` bridge — see `resple/config/config_*.yaml`).
+
+A third, optional node, **`MapSaving`**, accumulates the dense global map for the whole session (see [Map Saving](#map-saving) below).
+
+## Dependencies
 Tested with [ROS2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html) on Ubuntu 24.04
 ```
 sudo apt install libomp-dev libpcl-dev libeigen3-dev
 sudo apt install ros-jazzy-pcl*
-# Optional: sudo apt install ros-jazzy-rosbag2-storage-mcap (for playing .mcap file if testing GrandTour dataset)
 ```
 
-
-### Compilation
+## Compilation
 ```
 cd ~/ros2_ws/src
-git clone --recursive https://github.com/ASIG-X/RESPLE.git
+git clone --recursive https://github.com/paureverte/RESPLE.git
 cd ..
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --packages-select estimate_msgs livox_ros_driver livox_interfaces livox_ros_driver2 resple
 ```
 
-## Docker Build
+## Docker
 
-A ready-to-use ROS2 Jazzy development image is provided under `docker/`:
+A ready-to-use ROS2 Jazzy development image is provided under `docker/`.
 
+### Build
 ```bash
 cd ~/path/to/src
-git clone --recursive https://github.com/ASIG-X/RESPLE.git
+git clone --recursive https://github.com/paureverte/RESPLE.git
 cd RESPLE/docker
 ./build.sh
 ```
-
 This builds the `resple:jazzy` image (pass `./build.sh --no-cache` to force a clean rebuild).
 
-## Own experimental datasets ([LINK to SURFdrive](https://surfdrive.surf.nl/files/index.php/s/lfXfApqVXTLIS9l)) 
-Password: RESPLE2025
+### Run
 
-<!-- ![image](doc/real_experiment2.gif) -->
-<!-- [![Watch the video](doc/real_exp_2.png)](https://youtu.be/2OvjGnxszf8) -->
-<div align="left">
-<img src="doc/hemdyn_clip.gif" width=49.6% />
-<img src="doc/Rcampus_clip.gif" width = 49.6% >
-</div>
-<br>
+With the image built, run the algorithm in a docker container via `docker compose`.
 
-**HelmDyn (Helm Dynamic) dataset**
-* 1 Livox Mid360 mounted on a helmet as a mobile platform
-* 10 sequences recorded with very dynamic motions combining walking, running, jumping, and in-hand waving within a cubic space   
-* Ground truth trajectory recorded using a high-precision (submillimeter), low-latency motion capture system (Qualisys) involving 20 cameras
-
-**R-Campus dataset**
-* 1 Livox Avia mounted on a bipedal wheeled robot (Direct Drive DIABLO)
-* 1 sequence in walking speed recorded in a large-scale campus environment
-* Trajectory starts and ends at the same location point. 
-
-**TudoRun (Tudor Run) dataset**
-* 1 Livox Mid360 mounted on a Unitree Go2 quadruped robot
-* 8 indoor sequences with dynamic motions: 3 fully captured in a test field with an 8-camera motion capture system, and 5 starting and ending in the test field but extending into a larger hall without motion capture
-* Ground truth trajectory recorded only within this test field using the motion capture system (Qualisys) with passive markers
-
-**Please refer to our [dataset website](https://asig-x.github.io/resple_web/datasets.html) for more information.**
-## Usage
-Every dataset/sensor setup is launched through the same generic launch file:
+Allow the docker user to generate graphics:
+```bash
+xhost +local:docker
 ```
+
+From `docker/`, start the container in the background (the repo root is mounted at `~/workspace/src/RESPLE`, and `build/`, `install/`, `log/` are mounted for development so they persist outside the container):
+```bash
+cd docker
+docker compose up -d
+docker exec -it resple_jazzy bash
+```
+
+Inside the container, build the workspace with the `cb` alias (set up in `~/.bashrc`):
+```bash
+cb   # colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release && source install/setup.bash
+```
+
+Launch, replacing `<name>` with one of the configs from [Usage](#usage) below:
+```bash
+ros2 launch resple resple.launch.py config:=<name>
+```
+
+Open a second terminal attached to the same running container and play a bag:
+```bash
+docker exec -it resple_jazzy bash
+ros2 bag play /path/to/bag/
+```
+
+Manage the container from `docker/`:
+* `docker compose stop` — stop it
+* `docker compose up -d` — start it again
+* `docker compose down` — remove it
+
+## Usage
+
+Every dataset/sensor setup is launched through the same generic launch file:
+```bash
 source install/setup.bash
 ros2 launch resple resple.launch.py config:=<name>
 # Open another terminal and run
@@ -97,7 +104,8 @@ ros2 bag play /path/to/bag/
 ```
 Optional launch arguments:
 * `rviz:=false` — skip launching RViz (default `true`)
-* `publish_static_tf:=true` — also publish an identity `map`->`my_frame` static transform, for configs with no map-frame source of their own (default `false`)
+* `publish_static_tf:=true` — also publish an identity `map`→`my_frame` static transform, for configs with no map-frame source of their own (default `false`)
+* `map_saving:=true` — also launch the `MapSaving` node (default `false`, see [Map Saving](#map-saving))
 
 Available `<name>` values, each backed by `resple/config/config_<name>.yaml`:
 
@@ -110,10 +118,37 @@ Available `<name>` values, each backed by `resple/config/config_<name>.yaml`:
 | `ouster` | Ouster + IMU | LiDAR-Inertial |
 | `ouster_lidaronly` | Ouster | LiDAR-only |
 
-Each `config_<name>.yaml` is commented inline and grouped into `imu:`, `lidar:`, `spline:`, `mapping:` and `wheel_odometry:` sections. Copy the closest one as a starting point for your own sensor setup, and toggle `if_lidar_only` to switch between LiDAR-only and LiDAR-Inertial for a given sensor.
+Each `config_<name>.yaml` is commented inline and grouped into `frames:`, `imu:`, `lidar:`, `spline:`, `mapping:`, `wheel_odometry:` and `target_link:` sections. Copy the closest one as a starting point for your own sensor setup, and toggle `if_lidar_only` to switch between LiDAR-only and LiDAR-Inertial for a given sensor.
 
 ## Wheel Odometry
-RESPLE can optionally fuse wheel/velocity odometry as a tightly-coupled IEKF factor, evaluated analytically against the B-spline's continuous linear and angular velocity, with adaptive covariance inflation to reject wheel slip. It is disabled by default; enable it per-config under `wheel_odometry:` (see `config_hap360.yaml` or `config_mid360.yaml` for the full commented template):
+
+RESPLE can optionally fuse wheel/velocity odometry as a **tightly-coupled** IEKF factor: rather than pre-integrating wheel velocity into a separate pose estimate and fusing that, the spline's own analytic linear and angular velocity are evaluated at the wheel measurement's exact timestamp and compared directly against the reported velocity — the same principle already used for the IMU factor.
+
+**Frames.** Let `W` be world, `B` the body/IMU frame (what the spline directly estimates), and `O` the wheel-odometry frame. `R_BO`, `p_BO` is the static extrinsic placing `O` in `B`, calibrated the same way as the LiDAR extrinsic (`q_wb`/`t_wb` in the config, inverted internally exactly like `q_lb`/`t_lb`).
+
+**Predicted velocity.** At the wheel measurement's timestamp $t_k$, the spline gives the world-frame linear velocity $\dot{\mathbf p}_W(t_k)$ and the body-frame angular velocity $\boldsymbol\omega_B(t_k)$ directly (both analytic derivatives of the spline — no finite differencing). The predicted velocity at the wheel frame, accounting for the lever-arm effect of rotation, is:
+
+$$\mathbf v_{\text{pred}}(t_k) = \mathbf R_{BO}^\top \left( \mathbf R_{WB}(t_k)^\top \dot{\mathbf p}_W(t_k) \;-\; \boldsymbol\omega_B(t_k) \times \mathbf p_{BO} \right)$$
+
+**Residual.**
+
+$$\mathbf r = \mathbf v_{\text{meas}} - \mathbf v_{\text{pred}}(t_k)$$
+
+If `use_only_vx: true`, only the forward-axis component $r_x$ is used (useful when lateral/vertical wheel velocity is dominated by non-holonomic noise rather than signal).
+
+**Jacobians.** Both are evaluated analytically against the spline's own basis-function Jacobians for each of the 4 active control points $i$ (translation $\mathbf p_i$ and orientation increment $\delta\boldsymbol\phi_i$) — the same per-knot Jacobians already computed for the LiDAR/IMU factors, no numerical differentiation:
+
+$$\frac{\partial \mathbf r}{\partial \mathbf p_i} = -\, \mathbf R_{BO}^\top \mathbf R_{WB}(t_k)^\top \, J_{\text{vel}, i}$$
+
+$$\frac{\partial \mathbf r}{\partial \delta\boldsymbol\phi_i} = -\, \mathbf R_{BO}^\top \left( [\mathbf v_{\text{body}}]_\times \, J_{\text{ortdel}, i} \;+\; [\mathbf p_{BO}]_\times \, J_{\text{gyro}, i} \right), \qquad \mathbf v_{\text{body}} = \mathbf R_{WB}(t_k)^\top \dot{\mathbf p}_W(t_k)$$
+
+where $[\cdot]_\times$ denotes the skew-symmetric cross-product matrix, and $J_{\text{vel},i}$, $J_{\text{ortdel},i}$, $J_{\text{gyro},i}$ are the spline's basis-function Jacobians for control point $i$.
+
+**Adaptive covariance (slip rejection).** Before the residual is weighted into the IEKF update, its forward-axis magnitude is checked against a threshold; if exceeded, the measurement covariance is inflated so the update trusts the wheel far less for that step (rather than being rejected outright):
+
+$$\mathbf M_w = \mathrm{diag}(\sigma_{vx}^2, \sigma_{vy}^2, \sigma_{vz}^2), \qquad \text{if } |r_x| > \tau_{\text{slip}}: \ \mathbf M_w \mathrel{*}= \lambda_{\text{slip}}$$
+
+**Config.** Disabled by default; enable it per-config under `wheel_odometry:` (see `config_hap360.yaml` or `config_mid360.yaml` for the full commented template):
 
 ```yaml
 wheel_odometry:
@@ -130,13 +165,13 @@ wheel_odometry:
   std_vy: 0.02
   std_vz: 0.02
 
-  max_allowed_residual_vx: 0.5           # residual (m/s) above which the update is treated as wheel slip
-  adaptive_covariance_multiplier: 100.0  # covariance inflation applied when slip is detected
+  max_allowed_residual_vx: 0.5           # τ_slip (m/s): residual above which the update is treated as wheel slip
+  adaptive_covariance_multiplier: 100.0  # λ_slip: covariance inflation applied when slip is detected
 ```
 
 ## Map Saving
 
-Both save services are `estimate_msgs/srv/SaveMap` (`string path` request, `bool success` + `string message` response) — pass an absolute `path` to save exactly there for that call, or omit it (empty string) to fall back to the path configured in the yaml.
+Two ways to save the map as a `.pcd` file. Both save services are `estimate_msgs/srv/SaveMap` (`string path` request, `bool success` + `string message` response) — pass an absolute `path` to save exactly there for that call, or omit it (empty string) to fall back to the path configured in the yaml.
 
 **Option 1 — save RESPLE's local map**
 
@@ -164,43 +199,6 @@ To view a saved `.pcd` file:
 ```bash
 pcl_viewer /path/to/output.pcd
 ```
-
-## Docker Usage
-
-With the image built (see Docker Build above), run the algorithm in a docker container via `docker compose`.
-
-Allow the docker user to generate graphics:
-```bash
-xhost +local:docker
-```
-
-From `docker/`, start the container in the background (the repo root is mounted at `~/workspace/src/RESPLE`, and `build/`, `install/`, `log/` are mounted for development so they persist outside the container):
-```bash
-cd docker
-docker compose up -d
-docker exec -it resple_jazzy bash
-```
-
-Inside the container, build the workspace with the `cb` alias (set up in `~/.bashrc`):
-```bash
-cb   # colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release && source install/setup.bash
-```
-
-Launch, replacing `<name>` with one of the configs from Usage above:
-```bash
-ros2 launch resple resple.launch.py config:=<name>
-```
-
-Open a second terminal attached to the same running container and play a bag:
-```bash
-docker exec -it resple_jazzy bash
-ros2 bag play /path/to/bag/
-```
-
-Manage the container from `docker/`:
-* `docker compose stop` — stop it
-* `docker compose up -d` — start it again
-* `docker compose down` — remove it
 
 ## Contributors
 Ziyu Cao (Email: ziyu.cao@liu.se)

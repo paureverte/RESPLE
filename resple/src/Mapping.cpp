@@ -14,6 +14,9 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2/exceptions.h>
 #include <rclcpp/service.hpp>
 #include <std_srvs/srv/empty.hpp>
 #include "livox_ros_driver/msg/custom_msg.hpp"
@@ -32,6 +35,7 @@ class MappingBase
     LidarConfig lidar;
     MappingBase(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : lidar(lidar_config)
     {
+        odom_id = CommonUtils::readParam<std::string>(nh, "frames.world", std::string("world"));
         pub_global_map = nh->create_publisher<sensor_msgs::msg::PointCloud2>("global_map", 2);
         float ds_map_voxel = CommonUtils::readParam<float>(nh, "mapping.ds_map_voxel", 0.2);
         ds_filter_each_scan.setLeafSize(ds_map_voxel, ds_map_voxel, ds_map_voxel);
@@ -112,9 +116,9 @@ class MappingBase
     Eigen::aligned_deque<typename pcl::PointCloud<PointType>> pc_L_buff;
     typename pcl::PointCloud<PointType>::Ptr pc_last;
     typename pcl::PointCloud<PointType>::Ptr pc_last_ds;
-    pcl::VoxelGrid<pcl::PointXYZINormal> ds_filter_each_scan;    
+    pcl::VoxelGrid<pcl::PointXYZINormal> ds_filter_each_scan;
     const std::string frame_id = "body";
-    const std::string odom_id = "world";
+    std::string odom_id = "world";
     typename pcl::PointCloud<PointType>::Ptr pc;
 
 };
@@ -417,6 +421,7 @@ public:
 
 Mapping(rclcpp::Node::SharedPtr &nh, std::vector<MappingBase<pcl::PointXYZINormal>*>& mappings)
     {
+        odom_id = CommonUtils::readParam<std::string>(nh, "frames.world", std::string("world"));
         sub_start = nh->create_subscription<std_msgs::msg::Int64>("/start_time", 100, std::bind(&Mapping::startCallBack, this, std::placeholders::_1));
         spl_window_st_ns = 0;
         sub_est = nh->create_subscription<estimate_msgs::msg::Estimate>("/est_window", 10000, std::bind(&Mapping::getEstCallback, this, std::placeholders::_1));
@@ -426,6 +431,30 @@ Mapping(rclcpp::Node::SharedPtr &nh, std::vector<MappingBase<pcl::PointXYZINorma
         vis_maps = mappings;
         pub_odom = nh->create_publisher<nav_msgs::msg::Odometry>("odometry", 500);
         br = std::make_shared<tf2_ros::TransformBroadcaster>(nh);
+        tf_buffer = std::make_unique<tf2_ros::Buffer>(nh->get_clock());
+        tf_listener = std::make_unique<tf2_ros::TransformListener>(*tf_buffer);
+
+        // target_link: an extra world->TF frame you can point anywhere, e.g. your robot's real
+        // base_link. frame_id names the published TF child frame; q_target/t_target is the
+        // IMU(body)->target extrinsic, same calibration convention as lidar's q_lb/t_lb.
+        // Defaults to identity and "base_link", i.e. base_link == body.
+        //
+        // frames.odom: if a live <frames.odom> -> <target_link.frame_id> transform is already
+        // being published by something else (e.g. your robot's wheel-odometry stack), RESPLE
+        // publishes world -> <frames.odom> instead of world -> <frame_id> directly, so it
+        // corrects that existing chain (REP-105 map->odom->base_link style) rather than fighting
+        // it for the same child frame name. Falls back to publishing world -> <frame_id> directly
+        // when no such transform is available (e.g. no odometry source at all).
+        target_link_frame_id = CommonUtils::readParam<std::string>(nh, "target_link.frame_id", std::string("base_link"));
+        odom_frame_id = CommonUtils::readParam<std::string>(nh, "frames.odom", std::string("odom"));
+        std::vector<double> q_blbase_v = CommonUtils::readParam<std::vector<double>>(
+            nh, "target_link.q_target", std::vector<double>{1.0, 0.0, 0.0, 0.0});
+        Eigen::Quaterniond q_blbase(q_blbase_v.at(0), q_blbase_v.at(1), q_blbase_v.at(2), q_blbase_v.at(3));
+        std::vector<double> t_blbase_v = CommonUtils::readParam<std::vector<double>>(
+            nh, "target_link.t_target", std::vector<double>{0.0, 0.0, 0.0});
+        Eigen::Vector3d t_blbase(t_blbase_v.at(0), t_blbase_v.at(1), t_blbase_v.at(2));
+        q_body_target = q_blbase.inverse();
+        t_body_target = q_blbase.inverse() * (- t_blbase);
     }
 
     void lock_mappings() {
@@ -474,10 +503,16 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_path;
     std::vector<MappingBase<pcl::PointXYZINormal>*> vis_maps;
     const std::string frame_id = "body";
-    const std::string odom_id = "world";
+    std::string odom_id = "world";
+    std::string target_link_frame_id = "base_link";
+    std::string odom_frame_id = "odom";
+    Eigen::Quaterniond q_body_target = Eigen::Quaterniond::Identity();
+    Eigen::Vector3d t_body_target = Eigen::Vector3d::Zero();
     std::shared_ptr<tf2_ros::TransformBroadcaster> br;
+    std::unique_ptr<tf2_ros::Buffer> tf_buffer;
+    std::unique_ptr<tf2_ros::TransformListener> tf_listener;
     bool if_init_succeed = false;
-    std::mutex m_spline;    
+    std::mutex m_spline;
 
     void displayControlPoints()
     {
@@ -551,10 +586,50 @@ private:
         transformStamped.transform.rotation.z = odom_pose.pose.orientation.z;
         br->sendTransform(transformStamped);
 
+        Eigen::Quaterniond q_wi(odom_pose.pose.orientation.w, odom_pose.pose.orientation.x, odom_pose.pose.orientation.y, odom_pose.pose.orientation.z);
+        Eigen::Vector3d t_wi(odom_pose.pose.position.x, odom_pose.pose.position.y, odom_pose.pose.position.z);
+        Eigen::Quaterniond q_w_target = q_wi * q_body_target;
+        Eigen::Vector3d t_w_target = q_wi * t_body_target + t_wi;
+
+        // If <odom_frame_id> -> <target_link_frame_id> is already being published live by
+        // something else (e.g. wheel odometry), publish world -> odom_frame_id instead, so we
+        // correct that existing chain (REP-105 style) instead of fighting it for the same child
+        // frame. Otherwise fall back to publishing world -> target_link_frame_id directly.
+        std::string tf_child_frame = target_link_frame_id;
+        Eigen::Quaterniond q_w_pub = q_w_target;
+        Eigen::Vector3d t_w_pub = t_w_target;
+        if (tf_buffer->canTransform(odom_frame_id, target_link_frame_id, tf2::TimePointZero)) {
+            try {
+                geometry_msgs::msg::TransformStamped odom_to_target =
+                    tf_buffer->lookupTransform(odom_frame_id, target_link_frame_id, tf2::TimePointZero);
+                Eigen::Quaterniond q_odom_target(odom_to_target.transform.rotation.w, odom_to_target.transform.rotation.x,
+                    odom_to_target.transform.rotation.y, odom_to_target.transform.rotation.z);
+                Eigen::Vector3d t_odom_target(odom_to_target.transform.translation.x, odom_to_target.transform.translation.y,
+                    odom_to_target.transform.translation.z);
+                Eigen::Quaterniond q_world_odom = q_w_target * q_odom_target.inverse();
+                Eigen::Vector3d t_world_odom = t_w_target - (q_world_odom * t_odom_target);
+                tf_child_frame = odom_frame_id;
+                q_w_pub = q_world_odom;
+                t_w_pub = t_world_odom;
+            } catch (const tf2::TransformException& ex) {
+                // Race between canTransform and lookupTransform (e.g. buffer expired the data);
+                // fall back to publishing world -> target_link_frame_id directly this cycle.
+            }
+        }
+        transformStamped.header.stamp = odom_msg.header.stamp;
+        transformStamped.header.frame_id = odom_id;
+        transformStamped.child_frame_id = tf_child_frame;
+        transformStamped.transform.translation.x = t_w_pub.x();
+        transformStamped.transform.translation.y = t_w_pub.y();
+        transformStamped.transform.translation.z = t_w_pub.z();
+        transformStamped.transform.rotation.w = q_w_pub.w();
+        transformStamped.transform.rotation.x = q_w_pub.x();
+        transformStamped.transform.rotation.y = q_w_pub.y();
+        transformStamped.transform.rotation.z = q_w_pub.z();
+        br->sendTransform(transformStamped);
+
         int id_lidar = 0;
         for (const auto vis_map : vis_maps) {
-            Eigen::Quaterniond q_wi(odom_pose.pose.orientation.w, odom_pose.pose.orientation.x, odom_pose.pose.orientation.y, odom_pose.pose.orientation.z);
-            Eigen::Vector3d t_wi(odom_pose.pose.position.x, odom_pose.pose.position.y, odom_pose.pose.position.z);
             Eigen::Quaterniond q_wl = q_wi * vis_map->lidar.q_bl;
             Eigen::Vector3d t_wl = q_wi * vis_map->lidar.t_bl + t_wi;
             std::string lidar_str = "lidar" + std::to_string(id_lidar) + "_frame";

@@ -224,7 +224,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Int64>::SharedPtr pub_start_time;
     std::shared_ptr<tf2_ros::TransformBroadcaster> br;
     const std::string frame_id = "body";
-    const std::string odom_id = "world";    
+    std::string odom_id = "world";
 
     std::map<std::string, LidarConfig> lidars;
     float ds_lm_voxel;
@@ -290,6 +290,7 @@ private:
 
     void readParameters(rclcpp::Node::SharedPtr &nh)
     {
+        odom_id = CommonUtils::readParam<std::string>(nh, "frames.world", std::string("world"));
         ds_lm_voxel = CommonUtils::readParam<float>(nh, "mapping.ds_lm_voxel");
         float ds_scan_voxel = CommonUtils::readParam<float>(nh, "mapping.ds_scan_voxel");
         ds_filter_body.setLeafSize(ds_scan_voxel, ds_scan_voxel, ds_scan_voxel);
