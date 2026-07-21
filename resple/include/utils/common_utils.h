@@ -29,6 +29,16 @@ struct ImuData {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
+struct WheelData {
+    int64_t time_ns;
+    Eigen::Vector3d vel;           // measured velocity in wheel/odometry frame O
+    Eigen::Vector3d vel_itp;       // predicted velocity in frame O, filled by prepWheel
+    Eigen::Matrix<double, 3, 24> H;
+    WheelData(){}
+    WheelData(const int64_t s, const Eigen::Vector3d& v) : time_ns(s), vel(v) {}
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+
 struct PoseData {
     int64_t time_ns;
     Eigen::Quaterniond orient;
@@ -268,6 +278,42 @@ struct LidarConfig {
         q_bl = q_lb.inverse();
         t_bl = q_lb.inverse() * (- t_lb);
         w_pt = CommonUtils::readParam<double>(nh, prefix + "w_pt");
+    }
+};
+
+struct WheelConfig {
+    bool enable = false;
+    std::string topic;
+    std::string topic_type;
+    bool use_only_vx = true;
+    Eigen::Vector3d p_bo = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d R_bo = Eigen::Matrix3d::Identity();
+    double std_vx = 0.05;
+    double std_vy = 0.02;
+    double std_vz = 0.02;
+    double max_allowed_residual_vx = 0.5;
+    double adaptive_covariance_multiplier = 100.0;
+
+    WheelConfig() = default;
+
+    WheelConfig(rclcpp::Node::SharedPtr& nh) {
+        enable = CommonUtils::readParam<bool>(nh, "wheel_odometry.enable", false);
+        if (!enable) {
+            return;
+        }
+        topic = CommonUtils::readParam<std::string>(nh, "wheel_odometry.topic_name");
+        topic_type = CommonUtils::readParam<std::string>(nh, "wheel_odometry.topic_type");
+        use_only_vx = CommonUtils::readParam<bool>(nh, "wheel_odometry.use_only_vx", true);
+        std::vector<double> q_wb_v = CommonUtils::readParam<std::vector<double>>(nh, "wheel_odometry.q_wb");
+        Eigen::Quaterniond q_wb(q_wb_v.at(0), q_wb_v.at(1), q_wb_v.at(2), q_wb_v.at(3));
+        Eigen::Vector3d t_wb = CommonUtils::readVector3d(nh, "wheel_odometry.t_wb");
+        R_bo = q_wb.inverse().toRotationMatrix();
+        p_bo = q_wb.inverse() * (- t_wb);
+        std_vx = CommonUtils::readParam<double>(nh, "wheel_odometry.std_vx");
+        std_vy = CommonUtils::readParam<double>(nh, "wheel_odometry.std_vy");
+        std_vz = CommonUtils::readParam<double>(nh, "wheel_odometry.std_vz");
+        max_allowed_residual_vx = CommonUtils::readParam<double>(nh, "wheel_odometry.max_allowed_residual_vx");
+        adaptive_covariance_multiplier = CommonUtils::readParam<double>(nh, "wheel_odometry.adaptive_covariance_multiplier");
     }
 };
 

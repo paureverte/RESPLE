@@ -52,7 +52,8 @@ class Estimator
         return state;
     }  
 
-    void updateIEKFLiDAR(Eigen::aligned_deque<PointData>& pt_meas, KD_TREE<pcl::PointXYZINormal>* ikdtree, const double pt_thresh, const double cov_thresh)
+    void updateIEKFLiDAR(Eigen::aligned_deque<PointData>& pt_meas, KD_TREE<pcl::PointXYZINormal>* ikdtree, const double pt_thresh, const double cov_thresh,
+        Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg)
     {
         const Eigen::Matrix<double, XSIZE, XSIZE> cov_prop = cov_rcp;
         Eigen::Matrix<double, XSIZE, 1> rcp_prop = getState();
@@ -66,7 +67,7 @@ class Estimator
                 Association::findCorresp(num_tot_eff, &spl, ikdtree, pt_meas);
             }
             if (num_tot_eff > 0) {
-                updateLiDAR(pt_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh);
+                updateLiDAR(pt_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, wheel_meas, wheel_cfg);
             } else {
                 break;
             }
@@ -89,7 +90,8 @@ class Estimator
     }
 
     void updateIEKFLiDARInertial(Eigen::aligned_deque<PointData>& pt_meas, KD_TREE<pcl::PointXYZINormal>* ikdtree, const double pt_thresh,
-        Eigen::aligned_deque<ImuData>& imu_meas, const Eigen::Vector3d& g, const Eigen::Vector3d& cov_acc, const Eigen::Vector3d& cov_gyro, const double cov_thresh)
+        Eigen::aligned_deque<ImuData>& imu_meas, const Eigen::Vector3d& g, const Eigen::Vector3d& cov_acc, const Eigen::Vector3d& cov_gyro, const double cov_thresh,
+        Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg)
     {
         const Eigen::Matrix<double, XSIZE, XSIZE> cov_prop = cov_rcp;
         Eigen::Matrix<double, XSIZE, 1> rcp_prop = getState();
@@ -103,9 +105,9 @@ class Estimator
                 Association::findCorresp(num_tot_eff, &spl, ikdtree, pt_meas);
             }
             if (num_tot_eff > 0 && imu_meas.empty()) {
-                updateLiDAR(pt_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh);
+                updateLiDAR(pt_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, wheel_meas, wheel_cfg);
             } else if (num_tot_eff > 0) {
-                updateLiDARInertial(pt_meas, imu_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, g, cov_acc, cov_gyro);
+                updateLiDARInertial(pt_meas, imu_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, g, cov_acc, cov_gyro, wheel_meas, wheel_cfg);
             } else {
                 break;
             }
@@ -187,7 +189,83 @@ class Estimator
         imu_data.H = Hi.template leftCols<24>();
     }    
 
-    void prepLiDAR(PointData& pt_data) const    
+    void prepWheel(WheelData& w, const WheelConfig& cfg)
+    {
+        Eigen::Quaterniond q_itp;
+        Eigen::Vector3d omega_b;
+        Jacobian43 J_ortdel;
+        Jacobian J_vel;
+        Jacobian33 J_gyro;
+        spl.itpQuaternion(w.time_ns, &q_itp, &omega_b, &J_ortdel, &J_gyro);
+        Eigen::Vector3d pdot_w = spl.itpPosition<1>(w.time_ns, &J_vel);
+        Eigen::Matrix3d RT = q_itp.inverse().toRotationMatrix();
+        Eigen::Vector3d v_body = RT * pdot_w;
+        w.vel_itp = cfg.R_bo.transpose() * (v_body - omega_b.cross(cfg.p_bo));
+
+        Eigen::Matrix<double, 3, 4> drot;
+        Quater::drot(pdot_w, q_itp, drot);
+        Eigen::Matrix3d p_bo_skew;
+        p_bo_skew <<              0, -cfg.p_bo.z(),  cfg.p_bo.y(),
+                        cfg.p_bo.z(),             0, -cfg.p_bo.x(),
+                       -cfg.p_bo.y(),  cfg.p_bo.x(),             0;
+
+        Eigen::Matrix<double, 3, XSIZE> Hi = Eigen::Matrix<double, 3, XSIZE>::Zero();
+        int recur_st_id = spl.numKnots() - 4;
+        for (int i = 0; i < (int) J_vel.d_val_d_knot.size(); i++) {
+            int j = J_vel.start_idx + i - recur_st_id;
+            if (j >= 0) {
+                Hi.block(0, j*6, 3, 3) = cfg.R_bo.transpose() * RT * J_vel.d_val_d_knot[i];
+                Hi.block(0, j*6 + 3, 3, 3) = cfg.R_bo.transpose() * (drot * J_ortdel.d_val_d_knot[i] + p_bo_skew * J_gyro.d_val_d_knot[i]);
+            }
+        }
+        w.H = Hi.template leftCols<24>();
+    }
+
+    // Appends wheel-odometry residual/Jacobian rows starting at idx_offset; returns the new offset.
+    // Row order relative to LiDAR/IMU rows is irrelevant since update() is a single batch solve.
+    template <int RSIZE>
+    int appendWheelRows(Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& cfg,
+        Eigen::Matrix<double, RSIZE, XSIZE>& H, Eigen::Matrix<double, RSIZE, 1>& innv,
+        Eigen::Matrix<double, RSIZE, 1>& mat_cov_inv, int idx_offset)
+    {
+        size_t num_wheel = wheel_meas.size();
+        #pragma omp parallel for num_threads(NUM_OF_THREAD)
+        for (size_t i = 0; i < num_wheel; i++) {
+            prepWheel(wheel_meas[i], cfg);
+        }
+        for (size_t i = 0; i < num_wheel; i++) {
+            const WheelData& w = wheel_meas[i];
+            Eigen::Vector3d r = w.vel - w.vel_itp;
+            double var_vx = cfg.std_vx * cfg.std_vx;
+            double var_vy = cfg.std_vy * cfg.std_vy;
+            double var_vz = cfg.std_vz * cfg.std_vz;
+            if (std::abs(r.x()) > cfg.max_allowed_residual_vx) {
+                var_vx *= cfg.adaptive_covariance_multiplier;
+                var_vy *= cfg.adaptive_covariance_multiplier;
+                var_vz *= cfg.adaptive_covariance_multiplier;
+            }
+            if (cfg.use_only_vx) {
+                Eigen::Matrix<double, 1, XSIZE> Hi = Eigen::Matrix<double, 1, XSIZE>::Zero();
+                Hi.template leftCols<24>() = w.H.row(0);
+                innv(idx_offset) = r.x();
+                H.row(idx_offset) = Hi;
+                mat_cov_inv(idx_offset) = 1.0 / var_vx;
+                idx_offset++;
+            } else {
+                Eigen::Matrix<double, 3, XSIZE> Hi = Eigen::Matrix<double, 3, XSIZE>::Zero();
+                Hi.template leftCols<24>() = w.H;
+                innv.template segment<3>(idx_offset) = r;
+                H.block(idx_offset, 0, 3, XSIZE) = Hi;
+                mat_cov_inv(idx_offset) = 1.0 / var_vx;
+                mat_cov_inv(idx_offset + 1) = 1.0 / var_vy;
+                mat_cov_inv(idx_offset + 2) = 1.0 / var_vz;
+                idx_offset += 3;
+            }
+        }
+        return idx_offset;
+    }
+
+    void prepLiDAR(PointData& pt_data) const
     {
         if (pt_data.if_valid) { 
             Eigen::Matrix<double, 1, XSIZE> Hi = Eigen::Matrix<double, 1, XSIZE>::Zero();
@@ -225,16 +303,19 @@ class Estimator
         }
     }        
 
-    bool updateLiDAR(Eigen::aligned_deque<PointData>& pt_meas, int num_valid, const Eigen::Matrix<double, XSIZE, 1>& x_prop, 
-        const Eigen::Matrix<double, XSIZE, XSIZE>& P_prop, const double pt_thresh, const double cov_thresh)
+    bool updateLiDAR(Eigen::aligned_deque<PointData>& pt_meas, int num_valid, const Eigen::Matrix<double, XSIZE, 1>& x_prop,
+        const Eigen::Matrix<double, XSIZE, XSIZE>& P_prop, const double pt_thresh, const double cov_thresh,
+        Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg)
     {
-        Eigen::Matrix<double, Eigen::Dynamic, XSIZE> H(num_valid, XSIZE);
-        Eigen::Matrix<double, Eigen::Dynamic, 1> innv(num_valid, 1);
-        Eigen::Matrix<double, Eigen::Dynamic, 1> mat_cov_inv(num_valid, 1);
-        H.setZero();    
+        int num_wheel_rows = wheel_meas.size() * (wheel_cfg.use_only_vx ? 1 : 3);
+        int dim_meas = num_valid + num_wheel_rows;
+        Eigen::Matrix<double, Eigen::Dynamic, XSIZE> H(dim_meas, XSIZE);
+        Eigen::Matrix<double, Eigen::Dynamic, 1> innv(dim_meas, 1);
+        Eigen::Matrix<double, Eigen::Dynamic, 1> mat_cov_inv(dim_meas, 1);
+        H.setZero();
         innv.setZero();
         mat_cov_inv.setConstant(1/0.01);
-        size_t num_pt = pt_meas.size();    
+        size_t num_pt = pt_meas.size();
         #pragma omp parallel for num_threads(NUM_OF_THREAD) schedule(dynamic)
         for (size_t i = 0; i < num_pt; i++) {
             PointData& pt_data = pt_meas[i];
@@ -255,25 +336,28 @@ class Estimator
                 mat_cov_inv(idx_offset) = 1/pt_data.var_pt;
                 idx_offset++;
             }
-        }        
+        }
+        idx_offset = appendWheelRows(wheel_meas, wheel_cfg, H, innv, mat_cov_inv, idx_offset);
         update(innv, mat_cov_inv, H, x_prop, P_prop);
         return true;
-    }           
+    }
 
-    void updateLiDARInertial(Eigen::aligned_deque<PointData>& pt_meas, Eigen::aligned_deque<ImuData>& imu_meas, int num_valid, const Eigen::Matrix<double, XSIZE, 1>& x_prop, 
-        const Eigen::Matrix<double, XSIZE, XSIZE>& P_prop, const double pt_thresh, const double cov_thresh, const Eigen::Vector3d& g, const Eigen::Vector3d& cov_acc, const Eigen::Vector3d& cov_gyro)
+    void updateLiDARInertial(Eigen::aligned_deque<PointData>& pt_meas, Eigen::aligned_deque<ImuData>& imu_meas, int num_valid, const Eigen::Matrix<double, XSIZE, 1>& x_prop,
+        const Eigen::Matrix<double, XSIZE, XSIZE>& P_prop, const double pt_thresh, const double cov_thresh, const Eigen::Vector3d& g, const Eigen::Vector3d& cov_acc, const Eigen::Vector3d& cov_gyro,
+        Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg)
     {
         Eigen::Matrix<double, 6, 1> cov_imu_inv =  Eigen::Matrix<double, 6, 1>(1/cov_acc[0], 1/cov_acc[1], 1/cov_acc[2], 1/cov_gyro[0], 1/cov_gyro[1], 1/cov_gyro[2]);
         #pragma omp parallel for num_threads(NUM_OF_THREAD) schedule(dynamic)
         for (size_t i = 0; i < pt_meas.size(); i++) {
             PointData& pt_data = pt_meas[i];
-            prepLiDAR(pt_data); 
+            prepLiDAR(pt_data);
         }
-        #pragma omp parallel for num_threads(NUM_OF_THREAD) 
+        #pragma omp parallel for num_threads(NUM_OF_THREAD)
         for (size_t i = 0; i < imu_meas.size(); i++) {
             prepIMU(imu_meas[i], g);
-        }                
-        int dim_meas = 6*imu_meas.size() + num_valid;
+        }
+        int num_wheel_rows = wheel_meas.size() * (wheel_cfg.use_only_vx ? 1 : 3);
+        int dim_meas = 6*imu_meas.size() + num_valid + num_wheel_rows;
         Eigen::Matrix<double, Eigen::Dynamic, XSIZE> H(dim_meas, XSIZE);
         Eigen::Matrix<double, Eigen::Dynamic, 1> innv(dim_meas, 1);
         Eigen::Matrix<double, Eigen::Dynamic, 1> mat_cov_inv(dim_meas, 1);
@@ -328,8 +412,9 @@ class Estimator
                     idx_offset += 6;
                     id_imu++;
             }
-        }        
-        update(innv, mat_cov_inv, H, x_prop, P_prop);        
+        }
+        idx_offset = appendWheelRows(wheel_meas, wheel_cfg, H, innv, mat_cov_inv, idx_offset);
+        update(innv, mat_cov_inv, H, x_prop, P_prop);
     }
 
     template <int RSIZE>

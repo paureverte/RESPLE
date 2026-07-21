@@ -126,7 +126,7 @@ class OusterBuff : public MappingBase<pcl::PointXYZINormal>
     {
         pc_subscription_ouster = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
             this->lidar.topic, 100, std::bind(&OusterBuff::ousterLidarCallback, this, std::placeholders::_1));         
-        double lidar_time_offset = CommonUtils::readParam<double>(nh, "lidar_time_offset", 0.0);
+        double lidar_time_offset = CommonUtils::readParam<double>(nh, "lidar.time_offset", 0.0);
         time_offset = 1e9*lidar_time_offset;        
     }
 
@@ -600,13 +600,13 @@ int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     auto nh = rclcpp::Node::make_shared("Mapping");
     std::vector<LidarConfig> lidars;
-    auto lidar_names = nh->declare_parameter<std::vector<std::string>>("lidars", std::vector<std::string>());
-    assert(nh->get_parameter({"lidars"}, lidar_names));
+    auto lidar_names = nh->declare_parameter<std::vector<std::string>>("lidar.names", std::vector<std::string>());
+    assert(nh->get_parameter({"lidar.names"}, lidar_names));
     if (lidar_names.empty()) {
-        lidars.emplace_back(nh, "");
+        lidars.emplace_back(nh, "lidar.");
     } else {
         for (const auto& lidar_name : lidar_names) {
-            lidars.emplace_back(nh, lidar_name + ".");
+            lidars.emplace_back(nh, "lidar." + lidar_name + ".");
         }
     }
     std::vector<MappingBase<pcl::PointXYZINormal>*> buffs;

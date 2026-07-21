@@ -1,0 +1,68 @@
+/**:
+  ros__parameters:
+    if_lidar_only: false   # true: LiDAR-only odometry, false: LiDAR-Inertial odometry
+
+    # ---- IMU ----
+    imu:
+      topic: /livox/imu          # TODO: match your driver's IMU topic
+      acc_ratio: true        # if true, multiply accelerometer readings by g (m/s^2 vs g units)
+      cov_acc: [1.0, 1.0, 1.0]        # accelerometer measurement noise covariance
+      cov_gyro: [0.1, 0.1, 0.1]       # gyroscope measurement noise covariance
+      cov_ba: [0.2, 0.2, 0.2]         # accel bias random-walk covariance (ignored when if_lidar_only: true)
+      cov_bg: [0.2, 0.2, 0.2]         # gyro bias random-walk covariance (ignored when if_lidar_only: true)
+
+    # ---- LiDAR ----
+    # lidar_type: Mid360Boxi subscribes to sensor_msgs/PointCloud2 (not the Livox CustomMsg format) —
+    # matches a Mid360 whose driver is configured to publish standard PointCloud2 (xfer_format: 1).
+    lidar:
+      names: ["livox"]      # active lidars, each needs a matching block below
+      time_offset: 0.0      # time offset between lidar and IMU, unit: s
+      livox:
+        topic_lidar: /livox/lidar        # TODO: match your driver's PointCloud2 topic
+        lidar_type: Mid360Boxi
+        scan_line: 4
+        blind: 0.5                       # min valid range, unit: m
+        q_lb: [1.0, 0.0, 0.0, 0.0]        # TODO: IMU->LiDAR extrinsic rotation (w, x, y, z) — identity placeholder
+        t_lb: [0.0, 0.0, 0.0]             # TODO: IMU->LiDAR extrinsic translation, unit: m — placeholder
+        w_pt: 0.01                       # per-point measurement weight
+
+    # ---- Continuous-time spline / IEKF ----
+    spline:
+      knot_hz: 100              # B-spline control-point rate, unit: Hz
+      cov_p0: 0.02               # initial control-point covariance
+      cov_rcp_pos_old: 0.5       # process-noise scale (position) for the 3 older active control points
+      cov_rcp_ort_old: 0.5       # process-noise scale (orientation) for the 3 older active control points
+      cov_rcp_pos_new: 1.0       # process-noise scale (position) for the newest control point
+      cov_rcp_ort_new: 1.0       # process-noise scale (orientation) for the newest control point
+      std_sys_pos: 0.1           # process noise std dev on position control points
+      std_sys_ort: 0.1           # process noise std dev on orientation control points
+      n_iter: 1                  # IEKF convergence iterations before the covariance update
+
+    # ---- Mapping / LiDAR association ----
+    mapping:
+      ds_scan_voxel: 0.5         # voxel size for downsampling each scan, unit: m
+      ds_lm_voxel: 0.5           # voxel size for the local map (ikd-tree), unit: m
+      point_filter_num: 1        # keep 1 of every N raw points
+      nn_thresh: 0.5             # point-to-plane residual threshold for outlier rejection, unit: m
+      coeff_cov: 3.0             # covariance inflation factor for outlier rejection
+      num_nn: 5                  # nearest neighbors used for local plane fitting
+      cube_len: 1000.0           # local map cube size, unit: m
+      num_points_upd: 300        # max LiDAR points per IEKF update batch
+
+    # ---- Wheel odometry (tightly-coupled velocity factor) ----
+    wheel_odometry:
+      enable: false
+      topic_name: "/wheel_odom"
+      topic_type: "nav_msgs/msg/Odometry" # or "geometry_msgs/msg/TwistStamped"
+      use_only_vx: true
+
+      # Transformation from IMU/base (B) to the wheel-odometry frame (O)
+      q_wb: [1.0, 0.0, 0.0, 0.0]
+      t_wb: [0.0, 0.0, 0.0]
+
+      std_vx: 0.05
+      std_vy: 0.02
+      std_vz: 0.02
+
+      max_allowed_residual_vx: 0.5
+      adaptive_covariance_multiplier: 100.0

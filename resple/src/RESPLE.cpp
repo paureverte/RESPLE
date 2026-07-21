@@ -7,6 +7,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <tf2_ros/transform_broadcaster.h>
@@ -38,26 +39,38 @@ public:
     {
         readParameters(nh);
         if (!if_lidar_only) {
-            std::string imu_type = CommonUtils::readParam<std::string>(nh, "topic_imu");
+            std::string imu_type = CommonUtils::readParam<std::string>(nh, "imu.topic");
             sub_imu = nh->create_subscription<sensor_msgs::msg::Imu>(imu_type, 2000000, std::bind(&RESPLE::getImuCallback, this, std::placeholders::_1));
-        }        
+        }
         pub_est = nh->create_publisher<estimate_msgs::msg::Estimate>("est_window", 50);
         pub_start_time = nh->create_publisher<std_msgs::msg::Int64>("start_time", 50);
         pub_cur_scan = nh->create_publisher<sensor_msgs::msg::PointCloud2>("current_scan", 2);
-        br = std::make_shared<tf2_ros::TransformBroadcaster>(nh);        
-        auto lidar_names = nh->declare_parameter<std::vector<std::string>>("lidars", std::vector<std::string>());
-        assert(nh->get_parameter({"lidars"}, lidar_names));
+        br = std::make_shared<tf2_ros::TransformBroadcaster>(nh);
+        auto lidar_names = nh->declare_parameter<std::vector<std::string>>("lidar.names", std::vector<std::string>());
+        assert(nh->get_parameter({"lidar.names"}, lidar_names));
         if (lidar_names.empty()) {
-            LidarConfig lidar(nh, "");
+            LidarConfig lidar(nh, "lidar.");
             lidars.emplace(lidar.type, lidar);
             lidars_data.emplace(std::piecewise_construct, std::make_tuple(lidar.type), std::make_tuple());
         } else {
             for (const auto& lidar_name : lidar_names) {
-                LidarConfig lidar(nh, lidar_name + ".");
+                LidarConfig lidar(nh, "lidar." + lidar_name + ".");
                 lidars.emplace(lidar.type, lidar);
                 lidars_data.emplace(std::piecewise_construct, std::make_tuple(lidar.type), std::make_tuple());
             }
-        }    
+        }
+        if (wheel_cfg.enable) {
+            if (!wheel_cfg.topic_type.compare("nav_msgs/msg/Odometry")) {
+                sub_wheel_odom = nh->create_subscription<nav_msgs::msg::Odometry>(
+                        wheel_cfg.topic, 2000, std::bind(&RESPLE::getWheelOdomCallback, this, std::placeholders::_1));
+            } else if (!wheel_cfg.topic_type.compare("geometry_msgs/msg/TwistStamped")) {
+                sub_wheel_twist = nh->create_subscription<geometry_msgs::msg::TwistStamped>(
+                        wheel_cfg.topic, 2000, std::bind(&RESPLE::getWheelTwistCallback, this, std::placeholders::_1));
+            } else {
+                RCLCPP_FATAL_STREAM(nh->get_logger(), "Unknown wheel_odometry.topic_type: " << wheel_cfg.topic_type);
+                exit(1);
+            }
+        }
         for (const auto& [lidar_name, lidar] : lidars) {
             if (!lidar.type.compare("Ouster")) {
                 sub_ouster = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -78,7 +91,8 @@ public:
                 sub_livox_mid360_boxi = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
                         lidar.topic, 200000, std::bind(&RESPLE::livoxMid360BoxiCallback, this, std::placeholders::_1));
             }
-        }        
+        }
+        logStartupInfo();
     }
 
     void processData()
@@ -131,18 +145,29 @@ public:
             }
             while (collectMeasurements()) {
                 int64_t max_time_ns = pt_meas.back().time_ns;
+                if (wheel_cfg.enable) {
+                    while (!wheel_meas.empty() && wheel_meas.front().time_ns < spline->maxTimeNs() - spline->getKnotTimeIntervalNs()) {
+                        wheel_meas.pop_front();
+                    }
+                }
                 if (if_lidar_only) {
                     estimator_lo.propRCP(max_time_ns);
-                    estimator_lo.updateIEKFLiDAR(pt_meas, &ikdtree, param.nn_thresh, param.coeff_cov);  
+                    estimator_lo.updateIEKFLiDAR(pt_meas, &ikdtree, param.nn_thresh, param.coeff_cov, wheel_meas, wheel_cfg);
                 } else {
                     if (!imu_meas.empty()) {
                         max_time_ns = std::max(imu_meas.back().time_ns, max_time_ns);
                     }
                     while (!imu_meas.empty() && imu_meas.front().time_ns < spline->maxTimeNs() - spline->getKnotTimeIntervalNs()) {
                         imu_meas.pop_front();
-                    }                         
+                    }
                     estimator_lio.propRCP(max_time_ns);
-                    estimator_lio.updateIEKFLiDARInertial(pt_meas, &ikdtree, param.nn_thresh, imu_meas, gravity, param.cov_acc, param.cov_gyro, param.coeff_cov);  
+                    estimator_lio.updateIEKFLiDARInertial(pt_meas, &ikdtree, param.nn_thresh, imu_meas, gravity, param.cov_acc, param.cov_gyro, param.coeff_cov, wheel_meas, wheel_cfg);
+                }
+                if (wheel_cfg.enable && !wheel_meas.empty()) {
+                    const WheelData& w_dbg = wheel_meas.back();
+                    RCLCPP_INFO_THROTTLE(rclcpp::get_logger("RESPLE"), wheel_log_clock_, 1000,
+                        "wheel odom: meas=[%.3f %.3f %.3f] pred=[%.3f %.3f %.3f]",
+                        w_dbg.vel.x(), w_dbg.vel.y(), w_dbg.vel.z(), w_dbg.vel_itp.x(), w_dbg.vel_itp.y(), w_dbg.vel_itp.z());
                 }
                 #pragma omp parallel for num_threads(NUM_OF_THREAD)
                 for (size_t i = 0; i < pt_meas.size(); i++) {
@@ -228,9 +253,17 @@ private:
     std::mutex m_buff;
     bool acc_ratio;
     Eigen::Vector3d cov_ba;
-    Eigen::Vector3d cov_bg;    
+    Eigen::Vector3d cov_bg;
     Eigen::Vector3d gravity;
-    
+
+    WheelConfig wheel_cfg;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_wheel_odom;
+    rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr sub_wheel_twist;
+    Eigen::aligned_deque<WheelData> wheel_buff_;
+    Eigen::aligned_deque<WheelData> wheel_meas;
+    std::mutex m_wheel_buff;
+    rclcpp::Clock wheel_log_clock_{RCL_STEADY_TIME};
+
     bool if_init_filter = false;
     Estimator<24> estimator_lo;
     Estimator<30> estimator_lio;
@@ -251,50 +284,77 @@ private:
 
     void readParameters(rclcpp::Node::SharedPtr &nh)
     {
-        ds_lm_voxel = CommonUtils::readParam<float>(nh, "ds_lm_voxel");
-        float ds_scan_voxel = CommonUtils::readParam<float>(nh, "ds_scan_voxel");
+        ds_lm_voxel = CommonUtils::readParam<float>(nh, "mapping.ds_lm_voxel");
+        float ds_scan_voxel = CommonUtils::readParam<float>(nh, "mapping.ds_scan_voxel");
         ds_filter_body.setLeafSize(ds_scan_voxel, ds_scan_voxel, ds_scan_voxel);
-        param.nn_thresh = CommonUtils::readParam<double>(nh, "nn_thresh");
+        param.nn_thresh = CommonUtils::readParam<double>(nh, "mapping.nn_thresh");
         if_lidar_only = CommonUtils::readParam<bool>(nh, "if_lidar_only");
         if (!if_lidar_only) {
-            acc_ratio = CommonUtils::readParam<bool>(nh, "acc_ratio");
-            std::vector<double> bias_acc_var = CommonUtils::readParam<std::vector<double>>(nh, "cov_ba");
-            cov_ba << bias_acc_var.at(0), bias_acc_var.at(1), bias_acc_var.at(2);   
-            std::vector<double> bias_gyro_var = CommonUtils::readParam<std::vector<double>>(nh, "cov_bg");
-            cov_bg << bias_gyro_var.at(0), bias_gyro_var.at(1), bias_gyro_var.at(2);    
-            std::vector<double> acc_var = CommonUtils::readParam<std::vector<double>>(nh, "cov_acc");
+            acc_ratio = CommonUtils::readParam<bool>(nh, "imu.acc_ratio");
+            std::vector<double> bias_acc_var = CommonUtils::readParam<std::vector<double>>(nh, "imu.cov_ba");
+            cov_ba << bias_acc_var.at(0), bias_acc_var.at(1), bias_acc_var.at(2);
+            std::vector<double> bias_gyro_var = CommonUtils::readParam<std::vector<double>>(nh, "imu.cov_bg");
+            cov_bg << bias_gyro_var.at(0), bias_gyro_var.at(1), bias_gyro_var.at(2);
+            std::vector<double> acc_var = CommonUtils::readParam<std::vector<double>>(nh, "imu.cov_acc");
             param.cov_acc << acc_var.at(0), acc_var.at(1), acc_var.at(2);
-            std::vector<double> gyro_var = CommonUtils::readParam<std::vector<double>>(nh, "cov_gyro");
-            param.cov_gyro << gyro_var.at(0), gyro_var.at(1), gyro_var.at(2);                              
+            std::vector<double> gyro_var = CommonUtils::readParam<std::vector<double>>(nh, "imu.cov_gyro");
+            param.cov_gyro << gyro_var.at(0), gyro_var.at(1), gyro_var.at(2);
         }
 
-        dt_ns = 1e9 / CommonUtils::readParam<int>(nh, "knot_hz");        
-        double dt_s = double(dt_ns) * 1e-9;
-        cov_P0 = CommonUtils::readParam<double>(nh, "cov_P0");
-        cov_P0 *= (dt_s*dt_s);
-        cov_RCP_pos_old = CommonUtils::readParam<double>(nh, "cov_RCP_pos_old");
-        cov_RCP_ort_old = CommonUtils::readParam<double>(nh, "cov_RCP_ort_old");
-        cov_RCP_pos_new = CommonUtils::readParam<double>(nh, "cov_RCP_pos_new");
-        cov_RCP_ort_new = CommonUtils::readParam<double>(nh, "cov_RCP_ort_new");
-        double std_pos = CommonUtils::readParam<double>(nh, "std_sys_pos");
-        double std_ort = CommonUtils::readParam<double>(nh, "std_sys_ort");
-        cov_sys_pos = std_pos*std_pos*dt_s*dt_s;
-        cov_sys_ort = std_ort*std_ort*dt_s*dt_s;   
-        param.coeff_cov = CommonUtils::readParam<double>(nh, "coeff_cov", 10);
+        wheel_cfg = WheelConfig(nh);
 
-        cube_len = CommonUtils::readParam<double>(nh, "cube_len");
-        point_filter_num = CommonUtils::readParam<int>(nh, "point_filter_num");
-        num_points_upd = CommonUtils::readParam<int>(nh, "num_points_upd");
+        dt_ns = 1e9 / CommonUtils::readParam<int>(nh, "spline.knot_hz");
+        double dt_s = double(dt_ns) * 1e-9;
+        cov_P0 = CommonUtils::readParam<double>(nh, "spline.cov_p0");
+        cov_P0 *= (dt_s*dt_s);
+        cov_RCP_pos_old = CommonUtils::readParam<double>(nh, "spline.cov_rcp_pos_old");
+        cov_RCP_ort_old = CommonUtils::readParam<double>(nh, "spline.cov_rcp_ort_old");
+        cov_RCP_pos_new = CommonUtils::readParam<double>(nh, "spline.cov_rcp_pos_new");
+        cov_RCP_ort_new = CommonUtils::readParam<double>(nh, "spline.cov_rcp_ort_new");
+        double std_pos = CommonUtils::readParam<double>(nh, "spline.std_sys_pos");
+        double std_ort = CommonUtils::readParam<double>(nh, "spline.std_sys_ort");
+        cov_sys_pos = std_pos*std_pos*dt_s*dt_s;
+        cov_sys_ort = std_ort*std_ort*dt_s*dt_s;
+        param.coeff_cov = CommonUtils::readParam<double>(nh, "mapping.coeff_cov", 10);
+
+        cube_len = CommonUtils::readParam<double>(nh, "mapping.cube_len");
+        point_filter_num = CommonUtils::readParam<int>(nh, "mapping.point_filter_num");
+        num_points_upd = CommonUtils::readParam<int>(nh, "mapping.num_points_upd");
         if (if_lidar_only) {
-            estimator_lo.n_iter = CommonUtils::readParam<int>(nh, "n_iter");
+            estimator_lo.n_iter = CommonUtils::readParam<int>(nh, "spline.n_iter");
         } else {
-            estimator_lio.n_iter = CommonUtils::readParam<int>(nh, "n_iter");
+            estimator_lio.n_iter = CommonUtils::readParam<int>(nh, "spline.n_iter");
         }
         pc_last.reset(new pcl::PointCloud<pcl::PointXYZINormal>());
         pc_last_ds.reset(new pcl::PointCloud<pcl::PointXYZINormal>());
-        NUM_MATCH_POINTS = CommonUtils::readParam<int>(nh, "num_nn", 5);
-        double lidar_time_offset = CommonUtils::readParam<double>(nh, "lidar_time_offset", 0.0);
+        NUM_MATCH_POINTS = CommonUtils::readParam<int>(nh, "mapping.num_nn", 5);
+        double lidar_time_offset = CommonUtils::readParam<double>(nh, "lidar.time_offset", 0.0);
         time_offset = 1e9*lidar_time_offset;
+    }
+
+    // Uses std::cout rather than RCLCPP_INFO: the launch file runs this node at
+    // --log-level warn, which would silently swallow an RCLCPP_INFO startup banner.
+    void logStartupInfo()
+    {
+        std::cout << "========== RESPLE initializing ==========" << std::endl;
+        std::cout << "Mode: " << (if_lidar_only ? "LiDAR-only" : "LiDAR-Inertial") << std::endl;
+        if (!if_lidar_only) {
+            std::cout << "IMU topic: " << sub_imu->get_topic_name() << std::endl;
+        }
+        std::cout << "Spline knot rate: " << (1000000000LL / dt_ns) << " Hz" << std::endl;
+        std::cout << "LiDAR sensors (" << lidars.size() << "):" << std::endl;
+        for (const auto& [name, lidar] : lidars) {
+            std::cout << "  - " << name << ": type=" << lidar.type << " topic=" << lidar.topic
+                       << " scan_line=" << lidar.scan_line << " blind=" << lidar.blind << "m" << std::endl;
+        }
+        if (wheel_cfg.enable) {
+            std::cout << "Wheel odometry: enabled, topic=" << wheel_cfg.topic << " (" << wheel_cfg.topic_type
+                       << "), use_only_vx=" << (wheel_cfg.use_only_vx ? "true" : "false") << std::endl;
+        } else {
+            std::cout << "Wheel odometry: disabled" << std::endl;
+        }
+        std::cout << "Local map: cube_len=" << cube_len << "m ds_lm_voxel=" << ds_lm_voxel << "m" << std::endl;
+        std::cout << "==========================================" << std::endl;
     }
 
     void initFilter(int64_t start_t_ns, Eigen::Vector3d t_init = Eigen::Vector3d::Zero(), Eigen::Quaterniond q_init = Eigen::Quaterniond::Identity())
@@ -328,8 +388,26 @@ private:
     {
         m_buff.lock();
         imu_int_buff.push_back(imu_msg);
-        m_buff.unlock();        
-    }    
+        m_buff.unlock();
+    }
+
+    void getWheelOdomCallback(const nav_msgs::msg::Odometry::SharedPtr odom_msg)
+    {
+        int64_t t_ns = rclcpp::Time(odom_msg->header.stamp).nanoseconds();
+        Eigen::Vector3d vel(odom_msg->twist.twist.linear.x, odom_msg->twist.twist.linear.y, odom_msg->twist.twist.linear.z);
+        m_wheel_buff.lock();
+        wheel_buff_.emplace_back(t_ns, vel);
+        m_wheel_buff.unlock();
+    }
+
+    void getWheelTwistCallback(const geometry_msgs::msg::TwistStamped::SharedPtr twist_msg)
+    {
+        int64_t t_ns = rclcpp::Time(twist_msg->header.stamp).nanoseconds();
+        Eigen::Vector3d vel(twist_msg->twist.linear.x, twist_msg->twist.linear.y, twist_msg->twist.linear.z);
+        m_wheel_buff.lock();
+        wheel_buff_.emplace_back(t_ns, vel);
+        m_wheel_buff.unlock();
+    }
 
     template<typename T>
     void ousterLidarCallback(const sensor_msgs::msg::PointCloud2::SharedPtr ouster_msg_in)
@@ -746,14 +824,25 @@ private:
         if (!if_lidar_only) {
             while (!imu_buff.empty() && imu_buff.front().time_ns < spline->minTimeNs()) {
                 imu_buff.pop_front();
-            }                
+            }
             while (!imu_buff.empty() && imu_buff.front().time_ns <= max_time_ns) {
                 imu_meas.emplace_back(imu_buff.front());
                 imu_buff.pop_front();
-            } 
-        } 
+            }
+        }
+        if (wheel_cfg.enable) {
+            m_wheel_buff.lock();
+            while (!wheel_buff_.empty() && wheel_buff_.front().time_ns < spline->minTimeNs()) {
+                wheel_buff_.pop_front();
+            }
+            while (!wheel_buff_.empty() && wheel_buff_.front().time_ns <= max_time_ns) {
+                wheel_meas.emplace_back(wheel_buff_.front());
+                wheel_buff_.pop_front();
+            }
+            m_wheel_buff.unlock();
+        }
         return true;
- 
+
     }
 
     Eigen::Vector3d getPositionLiDAR(int64_t t_ns, const Eigen::Vector3d& t_bl)

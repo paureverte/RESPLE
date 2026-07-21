@@ -1,6 +1,11 @@
 ## mac OS Specific rule
 .DS_Store
 
+## ROS/colcon workspace artifacts
+build/
+install/
+log/
+
 ## Core latex/pdflatex auxiliary files:
 *.aux
 *.lof
