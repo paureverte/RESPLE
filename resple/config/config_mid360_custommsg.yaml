@@ -9,25 +9,27 @@
 
     # ---- IMU ----
     imu:
-      topic: /imu/data
-      acc_ratio: true       # if true, multiply accelerometer readings by g (m/s^2 vs g units)
+      topic: /livox/imu          # TODO: match your driver's IMU topic
+      acc_ratio: true        # if true, multiply accelerometer readings by g (m/s^2 vs g units)
       cov_acc: [1.0, 1.0, 1.0]        # accelerometer measurement noise covariance
       cov_gyro: [0.1, 0.1, 0.1]       # gyroscope measurement noise covariance
       cov_ba: [0.2, 0.2, 0.2]         # accel bias random-walk covariance (ignored when if_lidar_only: true)
       cov_bg: [0.2, 0.2, 0.2]         # gyro bias random-walk covariance (ignored when if_lidar_only: true)
 
     # ---- LiDAR ----
+    # lidar_type: LivoxCustomMsg subscribes to livox_ros_driver2/msg/CustomMsg (the Livox SDK's own
+    # message format, not sensor_msgs/PointCloud2 — for that, use config_mid360.yaml instead).
     lidar:
       names: ["livox"]      # active lidars, each needs a matching block below
       time_offset: 0.0      # time offset between lidar and IMU, unit: s
       livox:
-        topic_lidar: /lidar/scan
+        topic_lidar: /livox/lidar        # TODO: match your driver's CustomMsg topic
         lidar_type: LivoxCustomMsg
         scan_line: 4
-        blind: 0.5                        # min valid range, unit: m
-        q_lb: [1.0, 0.0, 0.0, 0.0]         # IMU->LiDAR extrinsic rotation (w, x, y, z)
+        blind: 0.5                       # min valid range, unit: m
+        q_lb: [1.0, 0.0, 0.0, 0.0]         # IMU->LiDAR extrinsic rotation (w, x, y, z) — identity
         t_lb: [0.011, 0.02329, -0.04412]   # IMU->LiDAR extrinsic translation, unit: m
-        w_pt: 0.01                        # per-point measurement weight
+        w_pt: 0.01                       # per-point measurement weight
 
     # ---- Continuous-time spline / IEKF ----
     spline:
@@ -39,21 +41,21 @@
       cov_rcp_ort_new: 1.0       # process-noise scale (orientation) for the newest control point
       std_sys_pos: 0.1           # process noise std dev on position control points
       std_sys_ort: 0.1           # process noise std dev on orientation control points
-      n_iter: 3                  # IEKF convergence iterations before the covariance update
+      n_iter: 1                  # IEKF convergence iterations before the covariance update
 
     # ---- Mapping / LiDAR association ----
     mapping:
-      ds_scan_voxel: 0.2         # voxel size for downsampling each scan, unit: m
-      ds_lm_voxel: 0.2           # voxel size for the local map (ikd-tree), unit: m
+      ds_scan_voxel: 0.5         # voxel size for downsampling each scan, unit: m
+      ds_lm_voxel: 0.5           # voxel size for the local map (ikd-tree), unit: m
       point_filter_num: 1        # keep 1 of every N raw points
       nn_thresh: 0.5             # point-to-plane residual threshold for outlier rejection, unit: m
-      coeff_cov: 5.0             # covariance inflation factor for outlier rejection
-      num_nn: 8                  # nearest neighbors used for local plane fitting
+      coeff_cov: 3.0             # covariance inflation factor for outlier rejection
+      num_nn: 5                  # nearest neighbors used for local plane fitting
       cube_len: 1000.0           # local map cube size, unit: m
-      num_points_upd: 100        # max LiDAR points per IEKF update batch
-      ds_map_voxel: 0.2          # voxel size for the accumulated global_map, unit: m
-      pcd_save_path: "/tmp/resple_map_hap360.pcd"               # output of the RESPLE /save_map service
-      global_pcd_save_path: "/tmp/resple_global_map_hap360.pcd" # output of the MapSaving /save_global_map service
+      num_points_upd: 300        # max LiDAR points per IEKF update batch
+      ds_map_voxel: 0.5          # voxel size for the accumulated global_map, unit: m
+      pcd_save_path: "/tmp/resple_map_mid360_custommsg.pcd"               # output of the RESPLE /save_map service
+      global_pcd_save_path: "/tmp/resple_global_map_mid360_custommsg.pcd" # output of the MapSaving /save_global_map service
 
     # ---- Wheel odometry (tightly-coupled velocity factor) ----
     wheel_odometry:

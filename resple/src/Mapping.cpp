@@ -220,13 +220,13 @@ class Mid70AviaBuff : public MappingBase<pcl::PointXYZINormal>
     rclcpp::Subscription<livox_ros_driver::msg::CustomMsg>::SharedPtr pc_subscription_livox;
 };
 
-class HAP360Buff : public MappingBase<pcl::PointXYZINormal>
+class LivoxCustomMsgBuff : public MappingBase<pcl::PointXYZINormal>
 {
 public:
-    HAP360Buff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
+    LivoxCustomMsgBuff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
     {
         pc_subscription_livox = nh->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-            this->lidar.topic, 100, std::bind(&HAP360Buff::livoxLidarCallback, this, std::placeholders::_1));
+            this->lidar.topic, 100, std::bind(&LivoxCustomMsgBuff::livoxLidarCallback, this, std::placeholders::_1));
     }
 
     void livoxLidarCallback(livox_ros_driver2::msg::CustomMsg::SharedPtr livox_msg_in)
@@ -691,8 +691,8 @@ int main(int argc, char** argv) {
             buffs.push_back(new OusterBuff(nh, lidar));
         } else if (!lidar.type.compare("Mid70Avia")) {
             buffs.push_back(new Mid70AviaBuff(nh, lidar));
-        } else if (!lidar.type.compare("HAP360")) {
-            buffs.push_back(new HAP360Buff(nh, lidar));    
+        } else if (!lidar.type.compare("LivoxCustomMsg")) {
+            buffs.push_back(new LivoxCustomMsgBuff(nh, lidar));
         } else if (!lidar.type.compare("AviaResple")) {
             buffs.push_back(new AviaRespleBuff(nh, lidar));
         } else if (!lidar.type.compare("Hesai")) {

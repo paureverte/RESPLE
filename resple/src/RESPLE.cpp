@@ -79,7 +79,7 @@ public:
             } else if (!lidar.type.compare("Mid70Avia")) {
                 sub_livox = nh->create_subscription<livox_ros_driver::msg::CustomMsg>(
                         lidar.topic, 200000, std::bind(&RESPLE::livoxLidarCallback, this, std::placeholders::_1));
-            } else if (!lidar.type.compare("HAP360")) {
+            } else if (!lidar.type.compare("LivoxCustomMsg")) {
                 sub_livox2 = nh->create_subscription<livox_ros_driver2::msg::CustomMsg>(
                         lidar.topic, 200000, std::bind(&RESPLE::livoxLidar2Callback, this, std::placeholders::_1));
             } else if (!lidar.type.compare("AviaResple")) {
@@ -505,7 +505,7 @@ private:
 
     void livoxLidar2Callback(const livox_ros_driver2::msg::CustomMsg::SharedPtr livox_msg_in)
     {
-        std::string name = "HAP360";
+        std::string name = "LivoxCustomMsg";
         const LidarConfig& lidar = lidars.at(name);     
         pcl::PointCloud<pcl::PointXYZINormal>::Ptr pc_last(new pcl::PointCloud<pcl::PointXYZINormal>());        
         int plsize = livox_msg_in->point_num;

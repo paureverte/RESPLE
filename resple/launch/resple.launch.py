@@ -69,7 +69,7 @@ def launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            'config', default_value='mid360',
+            'config', default_value='mid360_custommsg',
             description='Config name, e.g. "ouster" loads config/config_ouster.yaml'),
         DeclareLaunchArgument(
             'publish_static_tf', default_value='false',

@@ -114,11 +114,29 @@ Available `<name>` values, each backed by `resple/config/config_<name>.yaml`:
 | `hap360` | Livox HAP360 + IMU | LiDAR-Inertial |
 | `hap360_lidaronly` | Livox HAP360 | LiDAR-only |
 | `mid360` | Livox Mid360 (PointCloud2) + IMU | LiDAR-Inertial |
+| `mid360_custommsg` | Livox Mid360 (livox_ros_driver2 CustomMsg) + IMU | LiDAR-Inertial |
 | `mid360_hesai_lidaronly` | Livox Mid360 + Hesai | LiDAR-only, multi-LiDAR |
 | `ouster` | Ouster + IMU | LiDAR-Inertial |
 | `ouster_lidaronly` | Ouster | LiDAR-only |
 
 Each `config_<name>.yaml` is commented inline and grouped into `frames:`, `imu:`, `lidar:`, `spline:`, `mapping:`, `wheel_odometry:` and `target_link:` sections. Copy the closest one as a starting point for your own sensor setup, and toggle `if_lidar_only` to switch between LiDAR-only and LiDAR-Inertial for a given sensor.
+
+### LiDAR types
+
+Each entry under `lidar.<name>.lidar_type` selects both the ROS message type RESPLE subscribes to for that LiDAR *and* the point-field parsing/timestamp convention used — the two always go together, you can't mix a driver's actual output format with the wrong `lidar_type`:
+
+| `lidar_type` | ROS message type | Per-point timestamp | Notes |
+|---|---|---|---|
+| `Ouster` | `sensor_msgs/PointCloud2` (`ouster_ros::Point`) | relative offset (ns) from scan start, field `t` | |
+| `Hesai` | `sensor_msgs/PointCloud2` (`hesai_ros::Point`) | absolute epoch **seconds**, field `timestamp` | uses `ring`, not `tag`/`line` |
+| `Mid360` | `sensor_msgs/PointCloud2` (`livox_mid360::Point`) | absolute epoch **nanoseconds**, field `timestamp` | driver configured for standard PointCloud2 output (`xfer_format: 1`); has `tag`/`line` fields but does **not** currently filter by them (unlike the CustomMsg types below) |
+| `Mid70Avia` | `livox_ros_driver/msg/CustomMsg` (older Livox SDK package) | relative offset (ns) from scan start, field `offset_time` | filters by `tag`/`line` |
+| `LivoxCustomMsg` | `livox_ros_driver2/msg/CustomMsg` (current Livox SDK package) | relative offset (ns) from scan start, field `offset_time` | filters by `tag`/`line`; despite the name, not tied to any specific sensor model — matches whichever Livox unit your `livox_ros_driver2` publishes CustomMsg for |
+| `AviaResple` | `livox_interfaces/msg/CustomMsg` (third-party Livox SDK package) | relative offset (ns) from scan start, field `offset_time` | filters by `tag`/`line` |
+
+`Mid70Avia`, `LivoxCustomMsg` and `AviaResple` parse identically — the only reason there are three is that each corresponds to a different ROS2 package publishing its own `CustomMsg` type for the Livox SDK, not a difference in behavior.
+
+If your driver's actual message type/timestamp convention doesn't match the table above (verify with `ros2 topic echo <topic> --once` and compare against a known-good `header.stamp`), pick the closest existing parser as a starting point rather than guessing — a mismatched timestamp convention breaks deskewing silently instead of erroring out.
 
 ## Wheel Odometry
 
