@@ -218,7 +218,29 @@ public:
                     est_msg.spline = spline_msg;
                     est_msg.if_full_window.data = (spline->numKnots() >= 4);
                     est_msg.runtime.data = 0;
-                    pub_est->publish(est_msg);  
+                    Eigen::Matrix<double, 6, 6> pose_cov;
+                    Eigen::Vector3d v_body, w_body;
+                    Eigen::Matrix<double, 6, 6> twist_cov;
+                    if (if_lidar_only) {
+                        pose_cov = estimator_lo.getPoseCovariance();
+                        estimator_lo.getTwistWithCovariance(v_body, w_body, twist_cov);
+                    } else {
+                        pose_cov = estimator_lio.getPoseCovariance();
+                        estimator_lio.getTwistWithCovariance(v_body, w_body, twist_cov);
+                    }
+                    for (int r = 0; r < 6; r++) {
+                        for (int c = 0; c < 6; c++) {
+                            est_msg.pose_covariance[r*6 + c] = pose_cov(r, c);
+                            est_msg.twist.covariance[r*6 + c] = twist_cov(r, c);
+                        }
+                    }
+                    est_msg.twist.twist.linear.x = v_body.x();
+                    est_msg.twist.twist.linear.y = v_body.y();
+                    est_msg.twist.twist.linear.z = v_body.z();
+                    est_msg.twist.twist.angular.x = w_body.x();
+                    est_msg.twist.twist.angular.y = w_body.y();
+                    est_msg.twist.twist.angular.z = w_body.z();
+                    pub_est->publish(est_msg);
                     max_spl_knots = spline->numKnots();       
                 }
                 if (max_time_ns >= t_last_map_upd + kMapUpdatePeriodNs) {

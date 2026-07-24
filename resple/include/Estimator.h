@@ -92,7 +92,70 @@ class Estimator
 
     SplineState* getSpline() {
         return &spl;
-    }     
+    }
+
+    Eigen::Matrix<double, 6, 6> getPoseCovariance() const
+    {
+        int64_t t_ns = spl.maxTimeNs();
+        Jacobian J_pos;
+        Jacobian43 J_q;
+        spl.itpPosition(t_ns, &J_pos);
+        Eigen::Quaterniond q_out;
+        spl.itpQuaternion(t_ns, &q_out, nullptr, &J_q, nullptr);
+        Eigen::Matrix4d Ql_conj;
+        Quater::Qleft(q_out.conjugate(), Ql_conj);
+        Eigen::Matrix<double, 6, 24> H = Eigen::Matrix<double, 6, 24>::Zero();
+        int recur_st_id = spl.numKnots() - 4;
+        for (int i = 0; i < (int) J_pos.d_val_d_knot.size(); i++) {
+            int j = J_pos.start_idx + i - recur_st_id;
+            if (j >= 0) {
+                H.block(0, j*6, 3, 3) = J_pos.d_val_d_knot[i] * Eigen::Matrix3d::Identity();
+            }
+        }
+        for (int i = 0; i < (int) J_q.d_val_d_knot.size(); i++) {
+            int j = J_q.start_idx + i - recur_st_id;
+            if (j >= 0) {
+                H.block(3, j*6 + 3, 3, 3) = Ql_conj.bottomRows<3>() * J_q.d_val_d_knot[i];
+            }
+        }
+        return H * cov_rcp.template topLeftCorner<24, 24>() * H.transpose();
+    }
+
+    void getTwistWithCovariance(Eigen::Vector3d& v_out, Eigen::Vector3d& w_out, Eigen::Matrix<double, 6, 6>& cov_out) const
+    {
+        int64_t t_ns = spl.maxTimeNs();
+        Eigen::Quaterniond q_itp;
+        Jacobian43 J_ortdel;
+        Jacobian J_vel;
+        Jacobian33 J_gyro;
+        spl.itpQuaternion(t_ns, &q_itp, &w_out, &J_ortdel, &J_gyro);
+        Eigen::Vector3d pdot_w = spl.itpPosition<1>(t_ns, &J_vel);
+        Eigen::Matrix3d RT = q_itp.inverse().toRotationMatrix();
+        v_out = RT * pdot_w;
+        Eigen::Matrix<double, 3, 4> drot;
+        Quater::drot(pdot_w, q_itp, drot);
+        Eigen::Matrix<double, 6, 24> H = Eigen::Matrix<double, 6, 24>::Zero();
+        int recur_st_id = spl.numKnots() - 4;
+        for (int i = 0; i < (int) J_vel.d_val_d_knot.size(); i++) {
+            int j = J_vel.start_idx + i - recur_st_id;
+            if (j >= 0) {
+                H.block(0, j*6, 3, 3) = RT * J_vel.d_val_d_knot[i];
+            }
+        }
+        for (int i = 0; i < (int) J_ortdel.d_val_d_knot.size(); i++) {
+            int j = J_ortdel.start_idx + i - recur_st_id;
+            if (j >= 0) {
+                H.block(0, j*6 + 3, 3, 3) = drot * J_ortdel.d_val_d_knot[i];
+            }
+        }
+        for (int i = 0; i < (int) J_gyro.d_val_d_knot.size(); i++) {
+            int j = J_gyro.start_idx + i - recur_st_id;
+            if (j >= 0) {
+                H.block(3, j*6 + 3, 3, 3) = J_gyro.d_val_d_knot[i];
+            }
+        }
+        cov_out = H * cov_rcp.template topLeftCorner<24, 24>() * H.transpose();
+    }
 
   private:
     SplineState spl;

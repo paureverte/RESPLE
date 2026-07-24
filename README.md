@@ -3,7 +3,7 @@
 
 ## What is RESPLE?
 
-RESPLE is a continuous-time state estimator for 6-DoF pose (position + orientation), used here as the backbone for a family of direct LiDAR-based odometry systems: LiDAR-only (LO), LiDAR-Inertial (LIO), and their multi-LiDAR variants (MLO/MLIO). This fork additionally fuses tightly-coupled wheel/velocity odometry.
+RESPLE is a continuous-time state estimator for 6-DoF pose (position + orientation), used here as the backbone for a family of direct LiDAR-based odometry systems: LiDAR-only (LO), LiDAR-Inertial (LIO), and their multi-LiDAR variants (MLO/MLIO).
 
 ### Continuous-time trajectory as a B-spline
 
@@ -28,6 +28,12 @@ Two ROS2 nodes make up the pipeline:
 A third, optional node, **`MapSaving`**, accumulates the dense global map for the whole session (see [Map Saving](#map-saving) below).
 
 ![RESPLE demo](doc/demo.gif)
+
+## What This Fork Adds
+
+- **[Wheel Odometry](#wheel-odometry)** — optional, tightly-coupled fusion of wheel/velocity odometry as an IEKF factor, with adaptive covariance inflation to reject wheel slip.
+- **[Relocalization](#relocalization)** — opt-in, startup-only initialization against a previously-saved map: a coarse pose guess (config or RViz's "2D Pose Estimate") is refined via ICP before tracking starts.
+- **[Covariance](#covariance)** — `odometry` now publishes real pose and twist covariance, propagated from the IEKF's own filter state, plus twist (velocity) itself, previously unpublished.
 
 ## Dependencies
 Tested with [ROS2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html) on Ubuntu 24.04
@@ -240,6 +246,12 @@ relocalization:
   icp_max_corr_dist: 1.0                         # max ICP point-pair distance, unit: m
   icp_fitness_threshold: 0.5                     # reject (fatal-exit) if ICP's fitness exceeds this
 ```
+
+## Covariance
+
+`Mapping`'s `odometry` topic (`nav_msgs/msg/Odometry`) publishes real `pose.covariance` and a full `twist` (body-frame linear + angular velocity, with `twist.covariance`) — not placeholders. Both are propagated from the IEKF's own live control-point covariance, using the same analytic Jacobians already used to build the LiDAR/IMU/wheel factors' own residuals, evaluated at the current spline tip.
+
+One approximation worth knowing: the pose `odometry` actually publishes lags the live estimate by design (`Mapping` only publishes settled trajectory — see [Nodes](#nodes)). The covariance/twist transmitted correspond to RESPLE's estimate at message-send time; `Mapping` uses the most recently received values as a running proxy rather than re-deriving covariance for that exact, slightly older published pose.
 
 ## Contributors
 Ziyu Cao (Email: ziyu.cao@liu.se)

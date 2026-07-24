@@ -2,6 +2,7 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl/features/normal_3d.h>
 #include <pcl/filters/voxel_grid.h>
+#include <array>
 #include <thread>
 #include <iostream>
 #include <memory>
@@ -14,6 +15,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
+#include <geometry_msgs/msg/twist_with_covariance.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -277,6 +279,8 @@ private:
     std::string node_name = "Mapping";
     int64_t spl_window_st_ns;
     SplineState spline_global;
+    std::array<double, 36> latest_pose_covariance_{};
+    geometry_msgs::msg::TwistWithCovariance latest_twist_;
     rclcpp::Subscription<estimate_msgs::msg::Estimate>::SharedPtr sub_est;
     rclcpp::Subscription<std_msgs::msg::Int64>::SharedPtr sub_start;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom;
@@ -330,9 +334,11 @@ private:
             spline_w.setIdles(i, t_idle, quat_idle, q_idle0);
         }
         lock_mappings();
-        spl_window_st_ns = spline_msg.start_t - spline_msg.dt; 
+        spl_window_st_ns = spline_msg.start_t - spline_msg.dt;
         spline_global.setTimeIntervalNs(spline_msg.dt);
         spline_global.updateKnots(&spline_w);
+        latest_pose_covariance_ = est_msg->pose_covariance;
+        latest_twist_ = est_msg->twist;
         unlock_mappings();
     }
 
@@ -379,7 +385,9 @@ private:
         odom_msg.header.frame_id = odom_id;
         odom_msg.child_frame_id = frame_id;
         odom_msg.pose.pose = odom_pose.pose;
-        pub_odom->publish(odom_msg);      
+        odom_msg.pose.covariance = latest_pose_covariance_;
+        odom_msg.twist = latest_twist_;
+        pub_odom->publish(odom_msg);
         geometry_msgs::msg::TransformStamped transformStamped;
         transformStamped.header.stamp = odom_msg.header.stamp;
         transformStamped.header.frame_id = odom_id;
