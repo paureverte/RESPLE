@@ -130,6 +130,11 @@ class MappingBase
     std::string odom_id = "world";
     typename pcl::PointCloud<PointType>::Ptr pc;
 
+  public:
+    // The raw LiDAR message's own header.frame_id (e.g. "livox_frame"), captured
+    // from the first message so Mapping::pubOdom() can resolve target_link's
+    // extrinsic via TF against it (see frames.target_link in the config).
+    std::string sensor_frame_id;
 };
 
 
@@ -153,6 +158,7 @@ class GenericLidarBuff : public MappingBase<pcl::PointXYZINormal>
 
     void callback(const typename Adapter::Msg::SharedPtr msg_in)
     {
+        this->sensor_frame_id = msg_in->header.frame_id;
         this->pc_last->clear();
         rclcpp::Time stamp_begin(msg_in->header.stamp);
         Adapter adapter(*msg_in, this->lidar, stamp_begin);
@@ -213,24 +219,18 @@ Mapping(rclcpp::Node::SharedPtr &nh, std::vector<MappingBase<pcl::PointXYZINorma
         tf_buffer = std::make_unique<tf2_ros::Buffer>(nh->get_clock());
         tf_listener = std::make_unique<tf2_ros::TransformListener>(*tf_buffer);
 
-        // target_link: an extra world->TF frame you can point anywhere, e.g. your robot's real
-        // base_link. frame_id names the published TF child frame; q_target/t_target is the
-        // IMU(body)->target extrinsic, same calibration convention as lidar's q_lb/t_lb.
-        // Defaults to identity and "base_link", i.e. base_link == body.
-        //
-        // frames.odom: if a live <frames.odom> -> <target_link.frame_id> transform is already
-        // being published by something else (e.g. your robot's wheel-odometry stack), RESPLE
-        // publishes world -> <frames.odom> instead of world -> <frame_id> directly, so it
-        // corrects that existing chain (REP-105 map->odom->base_link style) rather than fighting
-        // it for the same child frame name. Falls back to publishing world -> <frame_id> directly
-        // when no such transform is available (e.g. no odometry source at all).
-        target_link_frame_id = CommonUtils::readParam<std::string>(nh, "target_link.frame_id", std::string("base_link"));
+        // frames.target_link: an extra world->TF frame you can point anywhere, e.g. your
+        // robot's real base_link. Its extrinsic from body is resolved via TF against the
+        // LiDAR's own frame (composed with lidar.q_lb/t_lb) if available, falling back to
+        // q_target/t_target below otherwise — see pubOdom(). frames.odom: as above, but for
+        // <frames.odom> -> <frame_id> (e.g. an existing wheel-odometry TF chain).
+        target_link_frame_id = CommonUtils::readParam<std::string>(nh, "frames.target_link.frame_id", std::string("base_link"));
         odom_frame_id = CommonUtils::readParam<std::string>(nh, "frames.odom", std::string("odom"));
         std::vector<double> q_blbase_v = CommonUtils::readParam<std::vector<double>>(
-            nh, "target_link.q_target", std::vector<double>{1.0, 0.0, 0.0, 0.0});
+            nh, "frames.target_link.q_target", std::vector<double>{1.0, 0.0, 0.0, 0.0});
         Eigen::Quaterniond q_blbase(q_blbase_v.at(0), q_blbase_v.at(1), q_blbase_v.at(2), q_blbase_v.at(3));
         std::vector<double> t_blbase_v = CommonUtils::readParam<std::vector<double>>(
-            nh, "target_link.t_target", std::vector<double>{0.0, 0.0, 0.0});
+            nh, "frames.target_link.t_target", std::vector<double>{0.0, 0.0, 0.0});
         Eigen::Vector3d t_blbase(t_blbase_v.at(0), t_blbase_v.at(1), t_blbase_v.at(2));
         q_body_target = q_blbase.inverse();
         t_body_target = q_blbase.inverse() * (- t_blbase);
@@ -290,6 +290,7 @@ private:
     std::string odom_frame_id = "odom";
     Eigen::Quaterniond q_body_target = Eigen::Quaterniond::Identity();
     Eigen::Vector3d t_body_target = Eigen::Vector3d::Zero();
+    bool target_extrinsic_resolved = false;
     std::shared_ptr<tf2_ros::TransformBroadcaster> br;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer;
     std::unique_ptr<tf2_ros::TransformListener> tf_listener;
@@ -335,11 +336,43 @@ private:
         unlock_mappings();
     }
 
+    // Resolves q_body_target/t_body_target via TF against a reference LiDAR's own frame
+    // (composed with that LiDAR's already-known q_bl/t_bl extrinsic), so frames.target_link's
+    // q_target/t_target don't have to duplicate what the robot's URDF/TF tree already knows.
+    // Retried every call until it succeeds (e.g. robot_state_publisher may come up after
+    // Mapping does); keeps the config values as-is (identity by default) until then.
+    void resolveTargetExtrinsic()
+    {
+        if (target_extrinsic_resolved || vis_maps.empty()) {
+            return;
+        }
+        const MappingBase<pcl::PointXYZINormal>* ref = vis_maps.front();
+        if (ref->sensor_frame_id.empty() || !tf_buffer->canTransform(ref->sensor_frame_id, target_link_frame_id, tf2::TimePointZero)) {
+            return;
+        }
+        try {
+            geometry_msgs::msg::TransformStamped lidar_to_target =
+                tf_buffer->lookupTransform(ref->sensor_frame_id, target_link_frame_id, tf2::TimePointZero);
+            Eigen::Quaterniond q_lidar_target(lidar_to_target.transform.rotation.w, lidar_to_target.transform.rotation.x,
+                lidar_to_target.transform.rotation.y, lidar_to_target.transform.rotation.z);
+            Eigen::Vector3d t_lidar_target(lidar_to_target.transform.translation.x, lidar_to_target.transform.translation.y,
+                lidar_to_target.transform.translation.z);
+            q_body_target = ref->lidar.q_bl * q_lidar_target;
+            t_body_target = ref->lidar.q_bl * t_lidar_target + ref->lidar.t_bl;
+            target_extrinsic_resolved = true;
+            RCLCPP_DEBUG_STREAM(rclcpp::get_logger(node_name), "target_link: resolved body->" << target_link_frame_id
+                       << " extrinsic via TF against " << ref->sensor_frame_id << " (frames.target_link.q_target/t_target ignored)");
+        } catch (const tf2::TransformException&) {
+            // Race between canTransform and lookupTransform; retry next call.
+        }
+    }
+
     void pubOdom()
     {
         if (opt_old_path.poses.empty()) {
             return;
         }
+        resolveTargetExtrinsic();
         nav_msgs::msg::Odometry odom_msg;
         geometry_msgs::msg::PoseStamped odom_pose = opt_old_path.poses.back();
         odom_msg.header.stamp = rclcpp::Time(odom_pose.header.stamp);

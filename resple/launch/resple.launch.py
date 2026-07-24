@@ -11,6 +11,7 @@ def launch_setup(context, *args, **kwargs):
     publish_static_tf = LaunchConfiguration('publish_static_tf').perform(context).lower() == 'true'
     use_rviz = LaunchConfiguration('rviz').perform(context).lower() == 'true'
     use_map_saving = LaunchConfiguration('map_saving').perform(context).lower() == 'true'
+    log_level = LaunchConfiguration('log_level').perform(context)
 
     config_yaml_fusion = os.path.join(
         get_package_share_directory('resple'), 'config', f'config_{config_name}.yaml')
@@ -34,7 +35,7 @@ def launch_setup(context, *args, **kwargs):
             emulate_tty=True,
             output='log',
             parameters=[config_yaml_fusion],
-            arguments=['--ros-args', '--log-level', 'INFO']),
+            arguments=['--ros-args', '--log-level', log_level]),
         Node(
             package='resple',
             executable='Mapping',
@@ -42,7 +43,7 @@ def launch_setup(context, *args, **kwargs):
             emulate_tty=True,
             output='log',
             parameters=[config_yaml_fusion],
-            arguments=['--ros-args', '--log-level', 'INFO']),
+            arguments=['--ros-args', '--log-level', log_level]),
     ]
 
     if publish_static_tf:
@@ -61,7 +62,7 @@ def launch_setup(context, *args, **kwargs):
             emulate_tty=True,
             output='log',
             parameters=[config_yaml_fusion],
-            arguments=['--ros-args', '--log-level', 'INFO']))
+            arguments=['--ros-args', '--log-level', log_level]))
 
     return nodes
 
@@ -81,5 +82,8 @@ def generate_launch_description():
             'map_saving', default_value='true',
             description='If true, also launch the MapSaving node, which accumulates everything published on '
                         '"global_map" and exposes it via the /save_global_map service'),
+        DeclareLaunchArgument(
+            'log_level', default_value='INFO',
+            description='--log-level for the RESPLE, Mapping and MapSaving nodes (e.g. DEBUG, INFO, WARN)'),
         OpaqueFunction(function=launch_setup),
     ])

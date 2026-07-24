@@ -5,7 +5,11 @@
     # ---- frames (general) ----
     frames:
       world: "world"   # RESPLE's fixed/global reference frame, published as the parent of body/target_link/lidar frames
-      odom: "odom"      # name of an existing external odom frame to bridge target_link to, if one is live (see target_link below)
+      odom: "odom"      # name of an existing external odom frame to bridge target_link to, if one is live
+      target_link:                        # extra world->TF frame; resolved via TF against the lidar frame if available, else falls back to q_target/t_target
+        frame_id: "base_link"
+        q_target: [1.0, 0.0, 0.0, 0.0]
+        t_target: [0.0, 0.0, 0.0]
 
     # ---- IMU ----
     imu:
@@ -86,19 +90,3 @@
 
       max_allowed_residual_vx: 0.5
       adaptive_covariance_multiplier: 100.0
-
-    # ---- target_link (optional) ----
-    # An extra world->TF frame you can point anywhere, e.g. your robot's real base_link.
-    # frame_id names the published TF child frame; q_target/t_target is the IMU/base(B)->target
-    # extrinsic, same convention as lidar's q_lb/t_lb. Defaults to identity and "base_link",
-    # i.e. base_link == body/IMU.
-    #
-    # odom_frame_id: if <odom_frame_id> -> <frame_id> is already being published live by
-    # something else (e.g. wheel odometry), RESPLE publishes world -> odom_frame_id instead
-    # (correcting that existing chain, REP-105 map->odom->base_link style) rather than also
-    # publishing world -> frame_id directly and colliding with it. Falls back to publishing
-    # world -> frame_id directly when no such transform exists (e.g. no odometry source at all).
-    target_link:
-      frame_id: "base_link"
-      q_target: [1.0, 0.0, 0.0, 0.0]
-      t_target: [0.0, 0.0, 0.0]

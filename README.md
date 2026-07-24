@@ -120,7 +120,7 @@ Available `<name>` values, each backed by `resple/config/config_<name>.yaml`:
 | `ouster` | Ouster + IMU | LiDAR-Inertial |
 | `ouster_lidaronly` | Ouster | LiDAR-only |
 
-Each `config_<name>.yaml` is commented inline and grouped into `frames:`, `imu:`, `lidar:`, `spline:`, `mapping:`, `wheel_odometry:` and `target_link:` sections. Copy the closest one as a starting point for your own sensor setup, and toggle `if_lidar_only` to switch between LiDAR-only and LiDAR-Inertial for a given sensor.
+Each `config_<name>.yaml` is commented inline and grouped into `frames:` (which also holds `target_link`), `imu:`, `lidar:`, `spline:`, `mapping:`, `relocalization:` and `wheel_odometry:` sections. Copy the closest one as a starting point for your own sensor setup, and toggle `if_lidar_only` to switch between LiDAR-only and LiDAR-Inertial for a given sensor.
 
 ### LiDAR types
 
