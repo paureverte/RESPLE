@@ -4,6 +4,7 @@
 #include <pcl/filters/voxel_grid.h>
 #include <thread>
 #include <iostream>
+#include <memory>
 #include <queue>
 #include <string>
 #include <sensor_msgs/msg/point_cloud.hpp>
@@ -30,8 +31,13 @@ class MappingBase
 {
   public:
 
-    std::mutex mtx;    
+    std::mutex mtx;
     LidarConfig lidar;
+
+    // Required for the unique_ptr<MappingBase<...>> owning each GenericLidarBuff<Adapter>
+    // in main() to destroy the derived object correctly, not just the base slice.
+    virtual ~MappingBase() = default;
+
     MappingBase(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : lidar(lidar_config)
     {
         odom_id = CommonUtils::readParam<std::string>(nh, "frames.world", std::string("world"));
@@ -47,6 +53,10 @@ class MappingBase
     {
         int64_t t_end_ns = 0;
         rclcpp::Rate rate(20);
+        // Left as manual lock/unlock rather than lock_guard: each branch unlocks at
+        // a different point on purpose (before publishMap/rate.sleep(), not after),
+        // so a single scoped guard would either publish/sleep while still holding
+        // the lock or need extra machinery to replicate this exactly.
         while (!pc_L_buff.empty()) {
             t_end_ns = pc_L_buff.front().header.stamp + int64_t (pc_L_buff.front().points.back().intensity * float(1e6));
             mtx.lock();
@@ -167,9 +177,10 @@ class GenericLidarBuff : public MappingBase<pcl::PointXYZINormal>
         ds_filter_each_scan.filter(*this->pc_last_ds);
         pc_last_ds->header.frame_id = this->frame_id;
         pc_last_ds->header.stamp = stamp_ns;
-        mtx.lock();
-        this->pc_L_buff.push_back(*pc_last_ds);
-        mtx.unlock();
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            this->pc_L_buff.push_back(*pc_last_ds);
+        }
     }
 
   private:
@@ -225,6 +236,9 @@ Mapping(rclcpp::Node::SharedPtr &nh, std::vector<MappingBase<pcl::PointXYZINorma
         t_body_target = q_blbase.inverse() * (- t_blbase);
     }
 
+    // lock_mappings()/unlock_mappings() bracket call sequences spanning multiple
+    // statements in process() (publishPath/displayControlPoints/pubOdom), so a
+    // scoped lock_guard doesn't fit without a bespoke multi-mutex RAII wrapper.
     void lock_mappings() {
         for (auto vis_map : vis_maps) {
             vis_map->mtx.lock();
@@ -427,13 +441,15 @@ private:
         if (!if_init_succeed || spline_global.numKnots() <= 4) {
             return;
         }
+        // Trajectory visualization resolution: one pose sample every 100ms.
+        static constexpr int64_t kPathSampleStepNs = 100'000'000;
         static int64_t t_ns = spline_global.minTimeNs();
         while (t_ns < std::min(spl_window_st_ns, spline_global.maxTimeNs())) {
             Eigen::Quaterniond orient_interp;
             Eigen::Vector3d t_interp = spline_global.itpPosition(t_ns);
             spline_global.itpQuaternion(t_ns, &orient_interp);
             opt_old_path.poses.push_back(CommonUtils::pose2msg(t_ns, t_interp, orient_interp));
-            t_ns += 1e8;
+            t_ns += kPathSampleStepNs;
         }
         pub_path->publish(opt_old_path);
     }         
@@ -453,21 +469,27 @@ int main(int argc, char** argv) {
             lidars.emplace_back(nh, "lidar." + lidar_name + ".");
         }
     }
-    std::vector<MappingBase<pcl::PointXYZINormal>*> buffs;
+    // Owns the per-LiDAR mapping buffers for the lifetime of the process; Mapping
+    // itself only observes them through the non-owning raw pointers below.
+    std::vector<std::unique_ptr<MappingBase<pcl::PointXYZINormal>>> buffs;
     for (const auto& lidar : lidars) {
         if (!lidar.type.compare("Ouster")) {
-            buffs.push_back(new OusterBuff(nh, lidar));
+            buffs.push_back(std::make_unique<OusterBuff>(nh, lidar));
         } else if (!lidar.type.compare("LivoxCustomMsg")) {
-            buffs.push_back(new LivoxCustomMsgBuff(nh, lidar));
+            buffs.push_back(std::make_unique<LivoxCustomMsgBuff>(nh, lidar));
         } else if (!lidar.type.compare("Hesai")) {
-            buffs.push_back(new HesaiBuff(nh, lidar));
+            buffs.push_back(std::make_unique<HesaiBuff>(nh, lidar));
         } else if (!lidar.type.compare("Mid360")) {
-            buffs.push_back(new Mid360Buff(nh, lidar));
+            buffs.push_back(std::make_unique<Mid360Buff>(nh, lidar));
         } else {
             exit(1);
         }
     }
-    Mapping mapping(nh, buffs);
+    std::vector<MappingBase<pcl::PointXYZINormal>*> buff_ptrs;
+    for (auto& buff : buffs) {
+        buff_ptrs.push_back(buff.get());
+    }
+    Mapping mapping(nh, buff_ptrs);
     std::thread mappingThread{&Mapping::process, &mapping};
     rclcpp::spin(nh);
     mappingThread.join();

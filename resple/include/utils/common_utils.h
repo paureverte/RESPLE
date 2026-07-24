@@ -10,8 +10,11 @@
 
 #include "utils/eigen_utils.hpp"
 
-int NUM_OF_THREAD = 5;
-int NUM_MATCH_POINTS = 5;
+// OpenMP worker count for the parallel loops in Estimator.h/Association.h.
+// Not runtime-configurable (unlike mapping.num_nn, threaded explicitly via
+// Parameters::num_nn), so this is a plain compile-time constant rather than
+// state living in Parameters.
+inline constexpr int kNumOmpThreads = 5;
 
 struct ImuData {
     int64_t time_ns;
@@ -106,6 +109,8 @@ namespace livox_mid360 {
 class CommonUtils
 {
 public:
+    static constexpr double kGravity = 9.81;
+
     template <typename T>
     static T readParam(rclcpp::Node::SharedPtr &n, std::string name)
     {
@@ -323,6 +328,7 @@ struct Parameters {
     Eigen::Vector3d gravity;
     double nn_thresh;
     double coeff_cov;
+    int num_nn;
 
     Parameters() {}
 
@@ -354,30 +360,8 @@ struct PointData {
         var_pt = w_pt;
     }
 
-    PointData(const PointData& other) : time_ns(other.time_ns), pt(other.pt), 
-        pt_b(other.pt_b), pt_w(other.pt_w), 
-        if_valid(other.if_valid), dist(other.dist), 
-        nearest_points(other.nearest_points), 
-        zp(other.zp), H(other.H), q_bl(other.q_bl), t_bl(other.t_bl), var_pt(other.var_pt) {
-    }        
-
-    PointData& operator=(const PointData& other) {
-        if (this != &other) { 
-            this->time_ns = other.time_ns;
-            this->pt = other.pt;
-            this->pt_b = other.pt_b;
-            this->pt_w = other.pt_w;
-            this->if_valid = other.if_valid;
-            this->nearest_points = other.nearest_points;
-            this->dist = other.dist;
-            this->zp = other.zp;
-            this->H = other.H;
-            this->q_bl = other.q_bl;
-            this->t_bl = other.t_bl;   
-            this->var_pt = other.var_pt;         
-        }
-        return *this;
-    }    
+    PointData(const PointData& other) = default;
+    PointData& operator=(const PointData& other) = default;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 

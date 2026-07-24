@@ -53,9 +53,9 @@ class Estimator
     }  
 
     void updateIEKFLiDAR(Eigen::aligned_deque<PointData>& pt_meas, KD_TREE<pcl::PointXYZINormal>* ikdtree, const double pt_thresh, const double cov_thresh,
-        Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg)
+        Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg, int num_nn)
     {
-        iterateIEKF(ikdtree, pt_meas,
+        iterateIEKF(ikdtree, pt_meas, num_nn,
             [&](int num_tot_eff, const Eigen::Matrix<double, XSIZE, 1>& rcp_prop, const Eigen::Matrix<double, XSIZE, XSIZE>& cov_prop) {
                 updateLiDAR(pt_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, wheel_meas, wheel_cfg);
             });
@@ -63,9 +63,9 @@ class Estimator
 
     void updateIEKFLiDARInertial(Eigen::aligned_deque<PointData>& pt_meas, KD_TREE<pcl::PointXYZINormal>* ikdtree, const double pt_thresh,
         Eigen::aligned_deque<ImuData>& imu_meas, const Eigen::Vector3d& g, const Eigen::Vector3d& cov_acc, const Eigen::Vector3d& cov_gyro, const double cov_thresh,
-        Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg)
+        Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg, int num_nn)
     {
-        iterateIEKF(ikdtree, pt_meas,
+        iterateIEKF(ikdtree, pt_meas, num_nn,
             [&](int num_tot_eff, const Eigen::Matrix<double, XSIZE, 1>& rcp_prop, const Eigen::Matrix<double, XSIZE, XSIZE>& cov_prop) {
                 if (imu_meas.empty()) {
                     updateLiDAR(pt_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, wheel_meas, wheel_cfg);
@@ -175,7 +175,7 @@ class Estimator
         Eigen::Matrix<double, RSIZE, 1>& mat_cov_inv, int idx_offset)
     {
         size_t num_wheel = wheel_meas.size();
-        #pragma omp parallel for num_threads(NUM_OF_THREAD)
+        #pragma omp parallel for num_threads(kNumOmpThreads)
         for (size_t i = 0; i < num_wheel; i++) {
             prepWheel(wheel_meas[i], cfg);
         }
@@ -254,7 +254,7 @@ class Estimator
     // converged yet, delegates the actual measurement update to doUpdate, and
     // folds the posterior covariance once convergence (or max_iter) is reached.
     template <typename UpdateFn>
-    void iterateIEKF(KD_TREE<pcl::PointXYZINormal>* ikdtree, Eigen::aligned_deque<PointData>& pt_meas, UpdateFn&& doUpdate)
+    void iterateIEKF(KD_TREE<pcl::PointXYZINormal>* ikdtree, Eigen::aligned_deque<PointData>& pt_meas, int num_nn, UpdateFn&& doUpdate)
     {
         const Eigen::Matrix<double, XSIZE, XSIZE> cov_prop = cov_rcp;
         const Eigen::Matrix<double, XSIZE, 1> rcp_prop = getState();
@@ -265,7 +265,7 @@ class Estimator
             Eigen::Matrix<double, XSIZE, 1> rcpi = getState();
             if (converged) {
                 num_tot_eff = 0;
-                Association::findCorresp(num_tot_eff, &spl, ikdtree, pt_meas);
+                Association::findCorresp(num_tot_eff, &spl, ikdtree, pt_meas, num_nn);
             }
             if (num_tot_eff > 0) {
                 doUpdate(num_tot_eff, rcp_prop, cov_prop);
@@ -303,7 +303,7 @@ class Estimator
         innv.setZero();
         mat_cov_inv.setConstant(1/0.01);
         size_t num_pt = pt_meas.size();
-        #pragma omp parallel for num_threads(NUM_OF_THREAD) schedule(dynamic)
+        #pragma omp parallel for num_threads(kNumOmpThreads) schedule(dynamic)
         for (size_t i = 0; i < num_pt; i++) {
             PointData& pt_data = pt_meas[i];
             prepLiDAR(pt_data);
@@ -334,12 +334,12 @@ class Estimator
         Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg)
     {
         Eigen::Matrix<double, 6, 1> cov_imu_inv =  Eigen::Matrix<double, 6, 1>(1/cov_acc[0], 1/cov_acc[1], 1/cov_acc[2], 1/cov_gyro[0], 1/cov_gyro[1], 1/cov_gyro[2]);
-        #pragma omp parallel for num_threads(NUM_OF_THREAD) schedule(dynamic)
+        #pragma omp parallel for num_threads(kNumOmpThreads) schedule(dynamic)
         for (size_t i = 0; i < pt_meas.size(); i++) {
             PointData& pt_data = pt_meas[i];
             prepLiDAR(pt_data);
         }
-        #pragma omp parallel for num_threads(NUM_OF_THREAD)
+        #pragma omp parallel for num_threads(kNumOmpThreads)
         for (size_t i = 0; i < imu_meas.size(); i++) {
             prepIMU(imu_meas[i], g);
         }

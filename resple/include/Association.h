@@ -24,29 +24,34 @@ public:
         po.curvature = pi.curvature;
     }     
 
-    static void findCorresp(int& effect_num_k, const SplineState* spline, KD_TREE<pcl::PointXYZINormal>* ikdtree, Eigen::aligned_deque<PointData>& pt_meas)
+    static void findCorresp(int& effect_num_k, const SplineState* spline, KD_TREE<pcl::PointXYZINormal>* ikdtree, Eigen::aligned_deque<PointData>& pt_meas, int num_nn)
     {
+        // Heuristic plane-fit acceptance guard (adapted from FAST-LIO): reject a
+        // fitted plane unless the point's range is large relative to its signed
+        // point-to-plane residual, i.e. residual < range / 9 (9^2 = 81 below).
+        constexpr double kPlaneResidualGuardSq = 81.0;
+
         int num_pt = pt_meas.size();
-        #pragma omp parallel for num_threads(NUM_OF_THREAD) schedule(dynamic)
+        #pragma omp parallel for num_threads(kNumOmpThreads) schedule(dynamic)
         for (int i = 0; i < num_pt; i++) {
             PointData& pt_data = pt_meas[i];
             pt_data.if_valid = false;
-            if (!(spline->numKnots() == 4) && !(pt_data.time_ns <= spline->maxTimeNs() && pt_data.time_ns >= spline->maxTimeNs() - 4*spline->getKnotTimeIntervalNs())) {                           
+            if (!(spline->numKnots() == 4) && !(pt_data.time_ns <= spline->maxTimeNs() && pt_data.time_ns >= spline->maxTimeNs() - 4*spline->getKnotTimeIntervalNs())) {
                 continue;
             }
             Association::pointBodyToWorld(pt_data.time_ns, spline, pt_data.pt, pt_data.pt_w, pt_data.t_bl, pt_data.q_bl);
-            std::vector<float> pointSearchSqDis(NUM_MATCH_POINTS);
+            std::vector<float> pointSearchSqDis(num_nn);
             pt_data.nearest_points.clear();
-            ikdtree->Nearest_Search(pt_data.pt_w, NUM_MATCH_POINTS, pt_data.nearest_points, pointSearchSqDis, 2.236); 
-            if (pt_data.nearest_points.size() >= (size_t)NUM_MATCH_POINTS && pointSearchSqDis[NUM_MATCH_POINTS - 1] < 5) {     
-                Eigen::Vector4f pabcd;       
+            ikdtree->Nearest_Search(pt_data.pt_w, num_nn, pt_data.nearest_points, pointSearchSqDis, 2.236);
+            if (pt_data.nearest_points.size() >= (size_t)num_nn && pointSearchSqDis[num_nn - 1] < 5) {
+                Eigen::Vector4f pabcd;
                 pabcd.setZero();
                 if (CommonUtils::esti_plane(pabcd, pt_data.nearest_points, 0.1f)) {
                     float pd2 = pabcd(0) * pt_data.pt_w.x + pabcd(1) * pt_data.pt_w.y + pabcd(2) * pt_data.pt_w.z + pabcd(3);
-                    if (pt_data.pt_b.norm() > 81.0 * pd2 * pd2) {
+                    if (pt_data.pt_b.norm() > kPlaneResidualGuardSq * pd2 * pd2) {
                         pt_data.if_valid = true;
                         pt_data.normvec = Eigen::Vector3d(pabcd[0], pabcd[1], pabcd[2]);
-                        pt_data.dist = pabcd(3);                            
+                        pt_data.dist = pabcd(3);
                     }
                 }
             }
@@ -54,7 +59,7 @@ public:
         for (int i = 0; i < num_pt; i++) {
             if (pt_meas[i].if_valid) {
                 effect_num_k++;
-            } 
-        }    
-    }        
+            }
+        }
+    }
 };

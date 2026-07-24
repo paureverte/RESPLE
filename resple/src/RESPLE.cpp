@@ -100,12 +100,14 @@ public:
             for (auto& [lidar_name, lidar_data] : lidars_data) {
                 while (!lidar_data.t_buff.empty()) {
                     pcl::PointCloud<pcl::PointXYZINormal>::Ptr pc_frame(new pcl::PointCloud<pcl::PointXYZINormal>());
-                    lidar_data.mtx_pc.lock();
-                    pc_frame->points = lidar_data.pc_buff.front();
-                    lidar_data.pc_buff.pop_front();
-                    int64_t time_begin = lidar_data.t_buff.front();
-                    lidar_data.t_buff.pop_front();
-                    lidar_data.mtx_pc.unlock();
+                    int64_t time_begin;
+                    {
+                        std::lock_guard<std::mutex> lock(lidar_data.mtx_pc);
+                        pc_frame->points = lidar_data.pc_buff.front();
+                        lidar_data.pc_buff.pop_front();
+                        time_begin = lidar_data.t_buff.front();
+                        lidar_data.t_buff.pop_front();
+                    }
                     std::vector<int> indices;
                     pcl::removeNaNFromPointCloud(*pc_frame, *pc_frame, indices);
                     pc_last_ds->clear();
@@ -121,15 +123,17 @@ public:
                 }
             }            
             if (!if_lidar_only && !imu_int_buff.empty()) {
-                m_buff.lock();
-                Eigen::aligned_vector<sensor_msgs::msg::Imu::SharedPtr> imu_buff_msg = imu_int_buff;
-                imu_int_buff.clear();
-                m_buff.unlock();
+                Eigen::aligned_vector<sensor_msgs::msg::Imu::SharedPtr> imu_buff_msg;
+                {
+                    std::lock_guard<std::mutex> lock(m_buff);
+                    imu_buff_msg = imu_int_buff;
+                    imu_int_buff.clear();
+                }
                 for (size_t i = 0; i < imu_buff_msg.size(); i++) {
                     const auto imu_msg = imu_buff_msg[i];
                     int64_t t_ns = rclcpp::Time(imu_msg->header.stamp).nanoseconds();
                     Eigen::Vector3d acc(imu_msg->linear_acceleration.x, imu_msg->linear_acceleration.y, imu_msg->linear_acceleration.z);
-                    if (acc_ratio) acc *= 9.81;
+                    if (acc_ratio) acc *= CommonUtils::kGravity;
                     Eigen::Vector3d gyro(imu_msg->angular_velocity.x, imu_msg->angular_velocity.y, imu_msg->angular_velocity.z);
                     ImuData imu(t_ns, gyro, acc); 
                     imu_buff.push_back(imu);
@@ -148,7 +152,7 @@ public:
                 }
                 if (if_lidar_only) {
                     estimator_lo.propRCP(max_time_ns);
-                    estimator_lo.updateIEKFLiDAR(pt_meas, &ikdtree, param.nn_thresh, param.coeff_cov, wheel_meas, wheel_cfg);
+                    estimator_lo.updateIEKFLiDAR(pt_meas, &ikdtree, param.nn_thresh, param.coeff_cov, wheel_meas, wheel_cfg, param.num_nn);
                 } else {
                     if (!imu_meas.empty()) {
                         max_time_ns = std::max(imu_meas.back().time_ns, max_time_ns);
@@ -157,7 +161,7 @@ public:
                         imu_meas.pop_front();
                     }
                     estimator_lio.propRCP(max_time_ns);
-                    estimator_lio.updateIEKFLiDARInertial(pt_meas, &ikdtree, param.nn_thresh, imu_meas, gravity, param.cov_acc, param.cov_gyro, param.coeff_cov, wheel_meas, wheel_cfg);
+                    estimator_lio.updateIEKFLiDARInertial(pt_meas, &ikdtree, param.nn_thresh, imu_meas, gravity, param.cov_acc, param.cov_gyro, param.coeff_cov, wheel_meas, wheel_cfg, param.num_nn);
                 }
                 if (wheel_cfg.enable && !wheel_meas.empty()) {
                     const WheelData& w_dbg = wheel_meas.back();
@@ -165,7 +169,7 @@ public:
                         "wheel odom: meas=[%.3f %.3f %.3f] pred=[%.3f %.3f %.3f]",
                         w_dbg.vel.x(), w_dbg.vel.y(), w_dbg.vel.z(), w_dbg.vel_itp.x(), w_dbg.vel_itp.y(), w_dbg.vel_itp.z());
                 }
-                #pragma omp parallel for num_threads(NUM_OF_THREAD)
+                #pragma omp parallel for num_threads(kNumOmpThreads)
                 for (size_t i = 0; i < pt_meas.size(); i++) {
                     PointData& pt_data = pt_meas[i];            
                     Association::pointBodyToWorld(pt_data.time_ns, spline, pt_data.pt, pt_data.pt_w, pt_data.t_bl, pt_data.q_bl);
@@ -186,7 +190,7 @@ public:
                     pub_est->publish(est_msg);  
                     max_spl_knots = spline->numKnots();       
                 }
-                if (max_time_ns >= t_last_map_upd + 1e8) {
+                if (max_time_ns >= t_last_map_upd + kMapUpdatePeriodNs) {
                     mapIncremental();
                     publishFrameWorld();
                     lasermapFovSegment();
@@ -229,8 +233,13 @@ private:
     std::vector<BoxPointType> cub_needrm;
     BoxPointType LocalMap_Points;
     std::vector<Eigen::aligned_vector<pcl::PointXYZINormal>> accum_nearest_points;
-    double cube_len = 2000; 
+    double cube_len = 2000;
     const float MOV_THRESHOLD = 1.5f;
+    // Incremental local-map update cadence (mapIncremental/publishFrameWorld/lasermapFovSegment).
+    static constexpr int64_t kMapUpdatePeriodNs = 100'000'000;
+    // Width of the initial time window (from the first point's timestamp) whose
+    // points seed the very first local map build in initialization().
+    static constexpr int64_t kInitialMapWindowNs = 100'000'000;
     float det_range = 100.0;
     bool if_init_map = false;
     struct LidarData {
@@ -325,7 +334,7 @@ private:
         }
         pc_last.reset(new pcl::PointCloud<pcl::PointXYZINormal>());
         pc_last_ds.reset(new pcl::PointCloud<pcl::PointXYZINormal>());
-        NUM_MATCH_POINTS = CommonUtils::readParam<int>(nh, "mapping.num_nn", 5);
+        param.num_nn = CommonUtils::readParam<int>(nh, "mapping.num_nn", 5);
         double lidar_time_offset = CommonUtils::readParam<double>(nh, "lidar.time_offset", 0.0);
         time_offset = 1e9*lidar_time_offset;
         pcd_save_path = CommonUtils::readParam<std::string>(nh, "mapping.pcd_save_path", std::string("/tmp/resple_map.pcd"));
@@ -386,27 +395,24 @@ private:
 
     void getImuCallback(const sensor_msgs::msg::Imu::SharedPtr imu_msg)
     {
-        m_buff.lock();
+        std::lock_guard<std::mutex> lock(m_buff);
         imu_int_buff.push_back(imu_msg);
-        m_buff.unlock();
     }
 
     void getWheelOdomCallback(const nav_msgs::msg::Odometry::SharedPtr odom_msg)
     {
         int64_t t_ns = rclcpp::Time(odom_msg->header.stamp).nanoseconds();
         Eigen::Vector3d vel(odom_msg->twist.twist.linear.x, odom_msg->twist.twist.linear.y, odom_msg->twist.twist.linear.z);
-        m_wheel_buff.lock();
+        std::lock_guard<std::mutex> lock(m_wheel_buff);
         wheel_buff_.emplace_back(t_ns, vel);
-        m_wheel_buff.unlock();
     }
 
     void getWheelTwistCallback(const geometry_msgs::msg::TwistStamped::SharedPtr twist_msg)
     {
         int64_t t_ns = rclcpp::Time(twist_msg->header.stamp).nanoseconds();
         Eigen::Vector3d vel(twist_msg->twist.linear.x, twist_msg->twist.linear.y, twist_msg->twist.linear.z);
-        m_wheel_buff.lock();
+        std::lock_guard<std::mutex> lock(m_wheel_buff);
         wheel_buff_.emplace_back(t_ns, vel);
-        m_wheel_buff.unlock();
     }
 
     // Shared by all 4 LiDAR types (see utils/lidar_adapters.h): Adapter absorbs the
@@ -439,10 +445,11 @@ private:
             }
         }
         LidarData& lidar_buffs = lidars_data.at(Adapter::kTypeName);
-        lidar_buffs.mtx_pc.lock();
-        lidar_buffs.pc_buff.push_back(pc_last->points);
-        lidar_buffs.t_buff.push_back(time_begin);
-        lidar_buffs.mtx_pc.unlock();
+        {
+            std::lock_guard<std::mutex> lock(lidar_buffs.mtx_pc);
+            lidar_buffs.pc_buff.push_back(pc_last->points);
+            lidar_buffs.t_buff.push_back(time_begin);
+        }
         last_t_ns = time_begin + max_ofs_ns;
     }
 
@@ -481,18 +488,20 @@ private:
             Eigen::Quaterniond q_WI = Eigen::Quaterniond::Identity();   
             if (!if_lidar_only) {
                 Eigen::Vector3d gravity_sum(0, 0, 0);
-                m_buff.lock();
-                int buff_size = imu_buff.size();
-                int n_imu = std::min(15, buff_size);
-                for (int i = 0; i < n_imu; i++) {
-                    gravity_sum += imu_buff.at(i).accel;
+                int n_imu;
+                {
+                    std::lock_guard<std::mutex> lock(m_buff);
+                    int buff_size = imu_buff.size();
+                    n_imu = std::min(15, buff_size);
+                    for (int i = 0; i < n_imu; i++) {
+                        gravity_sum += imu_buff.at(i).accel;
+                    }
+                    while (!imu_buff.empty() && imu_buff.front().time_ns < start_t_ns) {
+                        imu_buff.pop_front();
+                    }
                 }
-                while (!imu_buff.empty() && imu_buff.front().time_ns < start_t_ns) {
-                    imu_buff.pop_front();
-                }                    
-                m_buff.unlock();
                 gravity_sum /= n_imu;
-                Eigen::Vector3d gravity_ave = gravity_sum.normalized() * 9.81;
+                Eigen::Vector3d gravity_ave = gravity_sum.normalized() * CommonUtils::kGravity;
                 Eigen::Matrix3d R0 = CommonUtils::g2R(gravity_ave);
                 double yaw = CommonUtils::R2ypr(R0).x();
                 R0 = CommonUtils::ypr2R(Eigen::Vector3d{-yaw, 0, 0}) * R0;
@@ -518,7 +527,7 @@ private:
             int feats_down_size = 0;
             for (const auto& [lidar_name, lidar_data] : lidars_data) {
                 for (size_t i = 0; i < lidar_data.pt_buff.size(); i++) {
-                    if (lidar_data.pt_buff[i].time_ns < start_t_ns + 1e8) {
+                    if (lidar_data.pt_buff[i].time_ns < start_t_ns + kInitialMapWindowNs) {
                         feats_down_size++;
                     } else {
                         break;
@@ -533,7 +542,7 @@ private:
             int world_i = 0;
             for (const auto& [lidar_name, lidar_data] : lidars_data) {
                 for (size_t i = 0; i < lidar_data.pt_buff.size(); i++) {
-                    if (lidar_data.pt_buff[i].time_ns < start_t_ns + 1e8) {
+                    if (lidar_data.pt_buff[i].time_ns < start_t_ns + kInitialMapWindowNs) {
                         Association::pointBodyToWorld(start_t_ns, spline, lidar_data.pt_buff[i].pt,
                             pc_world.points[world_i], lidar_data.pt_buff[i].t_bl, lidar_data.pt_buff[i].q_bl);
                         world_i++;
@@ -543,7 +552,7 @@ private:
                 }
             }
             for (auto& [lidar_name, lidar_data] : lidars_data) {
-                while (!lidar_data.pt_buff.empty() && lidar_data.pt_buff.front().time_ns < start_t_ns + 1e8) {
+                while (!lidar_data.pt_buff.empty() && lidar_data.pt_buff.front().time_ns < start_t_ns + kInitialMapWindowNs) {
                     lidar_data.pt_buff.pop_front();
                 }
             }            
@@ -608,7 +617,7 @@ private:
             }
         }
         if (wheel_cfg.enable) {
-            m_wheel_buff.lock();
+            std::lock_guard<std::mutex> lock(m_wheel_buff);
             while (!wheel_buff_.empty() && wheel_buff_.front().time_ns < spline->minTimeNs()) {
                 wheel_buff_.pop_front();
             }
@@ -616,7 +625,6 @@ private:
                 wheel_meas.emplace_back(wheel_buff_.front());
                 wheel_buff_.pop_front();
             }
-            m_wheel_buff.unlock();
         }
         return true;
 
@@ -692,6 +700,11 @@ private:
 
     void mapIncremental()
     {
+        // Half a voxel cell's space diagonal (sqrt(3)/2): if the nearest already-
+        // mapped point is farther than this from the candidate's voxel center, the
+        // candidate is in a different, not-yet-downsampled voxel and is kept as-is.
+        constexpr double kHalfVoxelDiagonal = 0.8660254037844386;
+
         Eigen::aligned_vector<pcl::PointXYZINormal> PointToAdd;
         Eigen::aligned_vector<pcl::PointXYZINormal> PointNoNeedDownsample;
         int feats_down_size = pc_world.points.size();
@@ -707,7 +720,7 @@ private:
                 mid_point.x = floor(point.x/ds_lm_voxel)*ds_lm_voxel + 0.5 * ds_lm_voxel;
                 mid_point.y = floor(point.y/ds_lm_voxel)*ds_lm_voxel + 0.5 * ds_lm_voxel;
                 mid_point.z = floor(point.z/ds_lm_voxel)*ds_lm_voxel + 0.5 * ds_lm_voxel;
-                if (fabs(points_near[0].x - mid_point.x) > 0.866 * ds_lm_voxel || fabs(points_near[0].y - mid_point.y) > 0.866 * ds_lm_voxel || fabs(points_near[0].z - mid_point.z) > 0.866 * ds_lm_voxel){
+                if (fabs(points_near[0].x - mid_point.x) > kHalfVoxelDiagonal * ds_lm_voxel || fabs(points_near[0].y - mid_point.y) > kHalfVoxelDiagonal * ds_lm_voxel || fabs(points_near[0].z - mid_point.z) > kHalfVoxelDiagonal * ds_lm_voxel){
                     PointNoNeedDownsample.emplace_back(pc_world.points[i]);
                     continue;
                 }
