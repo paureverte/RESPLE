@@ -23,6 +23,7 @@
 #include "estimate_msgs/msg/calib.hpp"
 #include "estimate_msgs/msg/estimate.hpp"
 #include "SplineState.h"
+#include "utils/lidar_adapters.h"
 
 template<typename PointType>
 class MappingBase
@@ -122,39 +123,42 @@ class MappingBase
 };
 
 
-class OusterBuff : public MappingBase<pcl::PointXYZINormal>
+// Shared by all 4 LiDAR types (see utils/lidar_adapters.h): Adapter absorbs the
+// per-type message layout/timestamp convention/structural filter and the
+// display-only curvature scale; everything else (downsampling, buffering into
+// pc_L_buff) is generic. Unlike RESPLE's ingestion path there is no
+// point_filter_num decimation or blind-range filtering here — every
+// structurally-valid point is kept and later voxel-downsampled instead.
+template<typename Adapter>
+class GenericLidarBuff : public MappingBase<pcl::PointXYZINormal>
 {
   public:
-  OusterBuff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
+    GenericLidarBuff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
     {
-        pc_subscription_ouster = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
-            this->lidar.topic, 100, std::bind(&OusterBuff::ousterLidarCallback, this, std::placeholders::_1));         
+        pc_subscription = nh->create_subscription<typename Adapter::Msg>(
+            this->lidar.topic, 100, std::bind(&GenericLidarBuff::callback, this, std::placeholders::_1));
         double lidar_time_offset = CommonUtils::readParam<double>(nh, "lidar.time_offset", 0.0);
-        time_offset = 1e9*lidar_time_offset;        
+        time_offset = 1e9*lidar_time_offset;
     }
 
-    void ousterLidarCallback(const sensor_msgs::msg::PointCloud2::SharedPtr ouster_msg_in)
+    void callback(const typename Adapter::Msg::SharedPtr msg_in)
     {
         this->pc_last->clear();
-        pcl::PointCloud<ouster_ros::Point>::Ptr pc_last_ouster(new pcl::PointCloud<ouster_ros::Point>());
-        pcl::fromROSMsg(*ouster_msg_in, *pc_last_ouster);
-        size_t plsize = pc_last_ouster->size();
+        rclcpp::Time stamp_begin(msg_in->header.stamp);
+        Adapter adapter(*msg_in, this->lidar, stamp_begin);
+        size_t plsize = adapter.size();
         if (plsize == 0) return;
         this->pc_last->reserve(plsize);
-        pcl::PointXYZINormal pt;
-        for (uint i = 1; i < plsize; i++) {
-            pt.x = pc_last_ouster->points[i].x;
-            pt.y = pc_last_ouster->points[i].y;
-            pt.z = pc_last_ouster->points[i].z;
-            pt.intensity = float (pc_last_ouster->points[i].t) / float (1e6); // unit: ms
-            pt.curvature = 0.1 * pc_last_ouster->points[i].intensity;
-
-            if (pt.intensity >= 0) {
-                this->pc_last->points.push_back(pt);
-            }
+        for (size_t i = adapter.startIndex(); i < plsize; i++) {
+            pcl::PointXYZINormal pt;
+            if (!adapter.get(i, pt)) continue;
+            if (pt.intensity < 0) continue;
+            pt.curvature *= Adapter::kMappingCurvatureScale;
+            this->pc_last->points.push_back(pt);
         }
+        int64_t stamp_ns = stamp_begin.nanoseconds() - time_offset;
         this->pc_last->header.frame_id = this->frame_id;
-        this->pc_last->header.stamp = rclcpp::Time(ouster_msg_in->header.stamp).nanoseconds() - time_offset;
+        this->pc_last->header.stamp = stamp_ns;
         std::vector<int> indices;
         pcl::removeNaNFromPointCloud(*this->pc_last, *this->pc_last, indices);
         if (this->pc_last->points.empty()) return;
@@ -162,165 +166,21 @@ class OusterBuff : public MappingBase<pcl::PointXYZINormal>
         this->pc_last_ds->clear();
         ds_filter_each_scan.filter(*this->pc_last_ds);
         pc_last_ds->header.frame_id = this->frame_id;
-        pc_last_ds->header.stamp = rclcpp::Time(ouster_msg_in->header.stamp).nanoseconds() - time_offset;
+        pc_last_ds->header.stamp = stamp_ns;
         mtx.lock();
         this->pc_L_buff.push_back(*pc_last_ds);
         mtx.unlock();
     }
 
   private:
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_subscription_ouster;
+    typename rclcpp::Subscription<typename Adapter::Msg>::SharedPtr pc_subscription;
     int64_t time_offset = 0;
 };
 
-class LivoxCustomMsgBuff : public MappingBase<pcl::PointXYZINormal>
-{
-public:
-    LivoxCustomMsgBuff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
-    {
-        pc_subscription_livox = nh->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-            this->lidar.topic, 100, std::bind(&LivoxCustomMsgBuff::livoxLidarCallback, this, std::placeholders::_1));
-    }
-
-    void livoxLidarCallback(livox_ros_driver2::msg::CustomMsg::SharedPtr livox_msg_in)
-    {
-        this->pc_last->clear();
-        int plsize = livox_msg_in->point_num;
-        if (plsize == 0) return;
-        this->pc_last->reserve(plsize);
-        pcl::PointXYZINormal pt;
-        for (int i = 1; i < plsize; i++) {
-            if ((livox_msg_in->points[i].tag & 0x30) == 0x10 || (livox_msg_in->points[i].tag & 0x30) == 0x00) {
-                pt.x = livox_msg_in->points[i].x;
-                pt.y = livox_msg_in->points[i].y;
-                pt.z = livox_msg_in->points[i].z;
-                pt.intensity = float (livox_msg_in->points[i].offset_time) / float (1e6); // unit: ms         
-                pt.curvature = livox_msg_in->points[i].reflectivity;
-                pc_last->points.push_back(pt);
-            }
-        }
-        this->pc_last->header.frame_id = this->frame_id;
-        this->pc_last->header.stamp = rclcpp::Time(livox_msg_in->header.stamp).nanoseconds();
-        std::vector<int> indices;
-        pcl::removeNaNFromPointCloud(*this->pc_last, *this->pc_last, indices);
-        if (this->pc_last->points.empty()) return;
-        ds_filter_each_scan.setInputCloud(pc_last);
-        this->pc_last_ds->clear();
-        ds_filter_each_scan.filter(*this->pc_last_ds);
-        pc_last_ds->header.frame_id = this->frame_id;
-        pc_last_ds->header.stamp = rclcpp::Time(livox_msg_in->header.stamp).nanoseconds();
-        mtx.lock();
-        this->pc_L_buff.push_back(*pc_last_ds);
-        mtx.unlock();
-    }
-
-  private:
-    rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr pc_subscription_livox;
-};
-
-class HesaiBuff : public MappingBase<pcl::PointXYZINormal>
-{
-  public:
-  HesaiBuff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
-    {
-        pc_subscription_hesai = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
-            this->lidar.topic, 100, std::bind(&HesaiBuff::hesaiLidarCallback, this, std::placeholders::_1));
-    }
-
-    void hesaiLidarCallback(const sensor_msgs::msg::PointCloud2::SharedPtr hesai_msg_in)
-    {
-        this->pc_last->clear();
-        pcl::PointCloud<hesai_ros::Point>::Ptr pc_last_hesai(new pcl::PointCloud<hesai_ros::Point>());
-        pcl::fromROSMsg(*hesai_msg_in, *pc_last_hesai);
-        size_t plsize = pc_last_hesai->size();
-        if (plsize == 0) return;
-        this->pc_last->reserve(plsize);
-        rclcpp::Time timestamp_begin = rclcpp::Time(hesai_msg_in->header.stamp);
-        pcl::PointXYZINormal pt;
-        for (uint i = 0; i < plsize; i++) {
-            pt.x = pc_last_hesai->points[i].x;
-            pt.y = pc_last_hesai->points[i].y;
-            pt.z = pc_last_hesai->points[i].z;
-            double timestamp_s;
-            double timestamp_ns = std::modf(pc_last_hesai->points[i].timestamp, &timestamp_s);
-            rclcpp::Time timestamp_ros(static_cast<int32_t>(timestamp_s), static_cast<int32_t>(timestamp_ns * 1.0e9),
-                rcl_clock_type_t::RCL_ROS_TIME);
-            pt.intensity = (timestamp_ros - timestamp_begin).seconds() * 1.0e3; 
-            pt.curvature = pc_last_hesai->points[i].intensity;
-
-            if (pt.intensity >= 0) {
-                this->pc_last->points.push_back(pt);
-            }
-        }
-        this->pc_last->header.frame_id = this->frame_id;
-        this->pc_last->header.stamp = rclcpp::Time(hesai_msg_in->header.stamp).nanoseconds();
-        std::vector<int> indices;
-        pcl::removeNaNFromPointCloud(*this->pc_last, *this->pc_last, indices);
-        if (this->pc_last->points.empty()) return;
-        ds_filter_each_scan.setInputCloud(pc_last);
-        this->pc_last_ds->clear();
-        ds_filter_each_scan.filter(*this->pc_last_ds);
-        pc_last_ds->header.frame_id = this->frame_id;
-        pc_last_ds->header.stamp = rclcpp::Time(hesai_msg_in->header.stamp).nanoseconds();
-        mtx.lock();
-        this->pc_L_buff.push_back(*pc_last_ds);
-        mtx.unlock();
-    }
-
-  private:
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_subscription_hesai;
-};
-
-class Mid360Buff : public MappingBase<pcl::PointXYZINormal>
-{
-  public:
-  Mid360Buff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
-    {
-        pc_subscription_mid360 = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
-            this->lidar.topic, 100, std::bind(&Mid360Buff::mid360Callback, this, std::placeholders::_1));
-    }
-
-    void mid360Callback(const sensor_msgs::msg::PointCloud2::SharedPtr livox_msg_in)
-    {
-        this->pc_last->clear();
-        pcl::PointCloud<livox_mid360::Point>::Ptr pc_last_livox(new pcl::PointCloud<livox_mid360::Point>());
-        pcl::fromROSMsg(*livox_msg_in, *pc_last_livox);
-        size_t plsize = pc_last_livox->size();
-        if (plsize == 0) return;
-        this->pc_last->reserve(plsize);
-        rclcpp::Time timestamp_begin = rclcpp::Time(livox_msg_in->header.stamp);
-        pcl::PointXYZINormal pt;
-        for (uint i = 0; i < plsize; i++) {
-            pt.x = pc_last_livox->points[i].x;
-            pt.y = pc_last_livox->points[i].y;
-            pt.z = pc_last_livox->points[i].z;
-            rclcpp::Time timestamp_ros(static_cast<int64_t>(pc_last_livox->points[i].timestamp),
-                rcl_clock_type_t::RCL_ROS_TIME);
-            pt.intensity = (timestamp_ros - timestamp_begin).seconds() * 1.0e3; 
-            pt.curvature = pc_last_livox->points[i].intensity;
-
-            if (pt.intensity >= 0) {
-                this->pc_last->points.push_back(pt);
-            }
-        }
-        this->pc_last->header.frame_id = this->frame_id;
-        this->pc_last->header.stamp = rclcpp::Time(livox_msg_in->header.stamp).nanoseconds();
-        std::vector<int> indices;
-        pcl::removeNaNFromPointCloud(*this->pc_last, *this->pc_last, indices);
-        if (this->pc_last->points.empty()) return;
-        ds_filter_each_scan.setInputCloud(pc_last);
-        this->pc_last_ds->clear();
-        ds_filter_each_scan.filter(*this->pc_last_ds);
-        pc_last_ds->header.frame_id = this->frame_id;
-        pc_last_ds->header.stamp = rclcpp::Time(livox_msg_in->header.stamp).nanoseconds();
-        mtx.lock();
-        this->pc_L_buff.push_back(*pc_last_ds);
-        mtx.unlock();
-    }
-
-  private:
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_subscription_mid360;
-};
+using OusterBuff = GenericLidarBuff<OusterAdapter>;
+using HesaiBuff = GenericLidarBuff<HesaiAdapter>;
+using Mid360Buff = GenericLidarBuff<Mid360Adapter>;
+using LivoxCustomMsgBuff = GenericLidarBuff<LivoxCustomMsgAdapter>;
 
 class Mapping
 {
