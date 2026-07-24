@@ -55,78 +55,24 @@ class Estimator
     void updateIEKFLiDAR(Eigen::aligned_deque<PointData>& pt_meas, KD_TREE<pcl::PointXYZINormal>* ikdtree, const double pt_thresh, const double cov_thresh,
         Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg)
     {
-        const Eigen::Matrix<double, XSIZE, XSIZE> cov_prop = cov_rcp;
-        Eigen::Matrix<double, XSIZE, 1> rcp_prop = getState();
-        bool converged = true;
-        int num_tot_eff = 0;
-        int t = 0;
-        for (int i = 0; i < max_iter; i++) {
-            Eigen::Matrix<double, XSIZE, 1> rcpi = getState();
-            if (converged) {
-                num_tot_eff = 0;
-                Association::findCorresp(num_tot_eff, &spl, ikdtree, pt_meas);
-            }
-            if (num_tot_eff > 0) {
+        iterateIEKF(ikdtree, pt_meas,
+            [&](int num_tot_eff, const Eigen::Matrix<double, XSIZE, 1>& rcp_prop, const Eigen::Matrix<double, XSIZE, XSIZE>& cov_prop) {
                 updateLiDAR(pt_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, wheel_meas, wheel_cfg);
-            } else {
-                break;
-            }
-            converged = true;
-            Eigen::Matrix<double, XSIZE, 1> state_af = getState();
-            if ((state_af - rcpi).norm() > eps) {
-                converged = false;
-            } else {
-                t++;
-            }
-            if(!t && i == max_iter - 2) {
-                converged = true;
-            }
-            if ((t > n_iter) || (i == max_iter - 1)) {
-                cov_rcp = ( Eigen::MatrixXd::Identity(XSIZE, XSIZE) - KH) * cov_prop;
-                cov_rcp = 0.5*(cov_rcp + cov_rcp.transpose());
-                break;
-            }  
-        }
+            });
     }
 
     void updateIEKFLiDARInertial(Eigen::aligned_deque<PointData>& pt_meas, KD_TREE<pcl::PointXYZINormal>* ikdtree, const double pt_thresh,
         Eigen::aligned_deque<ImuData>& imu_meas, const Eigen::Vector3d& g, const Eigen::Vector3d& cov_acc, const Eigen::Vector3d& cov_gyro, const double cov_thresh,
         Eigen::aligned_deque<WheelData>& wheel_meas, const WheelConfig& wheel_cfg)
     {
-        const Eigen::Matrix<double, XSIZE, XSIZE> cov_prop = cov_rcp;
-        Eigen::Matrix<double, XSIZE, 1> rcp_prop = getState();
-        bool converged = true;
-        int num_tot_eff = 0;
-        int t = 0;
-        for (int i = 0; i < max_iter; i++) {
-            Eigen::Matrix<double, XSIZE, 1> rcpi = getState();
-            if (converged) {
-                num_tot_eff = 0;
-                Association::findCorresp(num_tot_eff, &spl, ikdtree, pt_meas);
-            }
-            if (num_tot_eff > 0 && imu_meas.empty()) {
-                updateLiDAR(pt_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, wheel_meas, wheel_cfg);
-            } else if (num_tot_eff > 0) {
-                updateLiDARInertial(pt_meas, imu_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, g, cov_acc, cov_gyro, wheel_meas, wheel_cfg);
-            } else {
-                break;
-            }
-            converged = true;
-            Eigen::Matrix<double, XSIZE, 1> state_af = getState();
-            if ((state_af - rcpi).norm() > eps) {
-                converged = false;
-            } else {
-                t++;
-            }
-            if(!t && i == max_iter - 2) {
-                converged = true;
-            }
-            if ((t > n_iter) || (i == max_iter - 1)) {
-                cov_rcp = ( Eigen::MatrixXd::Identity(XSIZE, XSIZE) - KH) * cov_prop;
-                cov_rcp = 0.5*(cov_rcp + cov_rcp.transpose());
-                break;
-            }              
-        }
+        iterateIEKF(ikdtree, pt_meas,
+            [&](int num_tot_eff, const Eigen::Matrix<double, XSIZE, 1>& rcp_prop, const Eigen::Matrix<double, XSIZE, XSIZE>& cov_prop) {
+                if (imu_meas.empty()) {
+                    updateLiDAR(pt_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, wheel_meas, wheel_cfg);
+                } else {
+                    updateLiDARInertial(pt_meas, imu_meas, num_tot_eff, rcp_prop, cov_prop, pt_thresh, cov_thresh, g, cov_acc, cov_gyro, wheel_meas, wheel_cfg);
+                }
+            });
     }
 
     void propRCP(int64_t t)
@@ -302,6 +248,47 @@ class Estimator
             bg = xupd.segment(BG_OFFSET, 3);   
         }
     }        
+
+    // Shared IEKF convergence loop for updateIEKFLiDAR/updateIEKFLiDARInertial:
+    // re-associates LiDAR correspondences whenever the previous iteration hasn't
+    // converged yet, delegates the actual measurement update to doUpdate, and
+    // folds the posterior covariance once convergence (or max_iter) is reached.
+    template <typename UpdateFn>
+    void iterateIEKF(KD_TREE<pcl::PointXYZINormal>* ikdtree, Eigen::aligned_deque<PointData>& pt_meas, UpdateFn&& doUpdate)
+    {
+        const Eigen::Matrix<double, XSIZE, XSIZE> cov_prop = cov_rcp;
+        const Eigen::Matrix<double, XSIZE, 1> rcp_prop = getState();
+        bool converged = true;
+        int num_tot_eff = 0;
+        int t = 0;
+        for (int i = 0; i < max_iter; i++) {
+            Eigen::Matrix<double, XSIZE, 1> rcpi = getState();
+            if (converged) {
+                num_tot_eff = 0;
+                Association::findCorresp(num_tot_eff, &spl, ikdtree, pt_meas);
+            }
+            if (num_tot_eff > 0) {
+                doUpdate(num_tot_eff, rcp_prop, cov_prop);
+            } else {
+                break;
+            }
+            converged = true;
+            Eigen::Matrix<double, XSIZE, 1> state_af = getState();
+            if ((state_af - rcpi).norm() > eps) {
+                converged = false;
+            } else {
+                t++;
+            }
+            if(!t && i == max_iter - 2) {
+                converged = true;
+            }
+            if ((t > n_iter) || (i == max_iter - 1)) {
+                cov_rcp = ( Eigen::MatrixXd::Identity(XSIZE, XSIZE) - KH) * cov_prop;
+                cov_rcp = 0.5*(cov_rcp + cov_rcp.transpose());
+                break;
+            }
+        }
+    }
 
     bool updateLiDAR(Eigen::aligned_deque<PointData>& pt_meas, int num_valid, const Eigen::Matrix<double, XSIZE, 1>& x_prop,
         const Eigen::Matrix<double, XSIZE, XSIZE>& P_prop, const double pt_thresh, const double cov_thresh,
