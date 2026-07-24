@@ -27,6 +27,8 @@ Two ROS2 nodes make up the pipeline:
 
 A third, optional node, **`MapSaving`**, accumulates the dense global map for the whole session (see [Map Saving](#map-saving) below).
 
+![RESPLE demo](doc/demo.gif)
+
 ## Dependencies
 Tested with [ROS2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html) on Ubuntu 24.04
 ```
@@ -115,7 +117,6 @@ Available `<name>` values, each backed by `resple/config/config_<name>.yaml`:
 | `hap360_lidaronly` | Livox HAP360 | LiDAR-only |
 | `mid360` | Livox Mid360 (PointCloud2) + IMU | LiDAR-Inertial |
 | `mid360_custommsg` | Livox Mid360 (livox_ros_driver2 CustomMsg) + IMU | LiDAR-Inertial |
-| `mid360_hesai_lidaronly` | Livox Mid360 + Hesai | LiDAR-only, multi-LiDAR |
 | `ouster` | Ouster + IMU | LiDAR-Inertial |
 | `ouster_lidaronly` | Ouster | LiDAR-only |
 
