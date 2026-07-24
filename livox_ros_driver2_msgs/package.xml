@@ -1,10 +1,10 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>livox_ros_driver</name>
+  <name>livox_ros_driver2</name>
   <version>0.0.1</version>
-  <description>livox interface for livox ros2 driver</description>
-  <maintainer email="dev@livoxtech.com">feng</maintainer>
-  <license>TODO: License declaration</license>
+  <description>Livox CustomMsg/CustomPoint interfaces for RESPLE</description>
+  <maintainer email="pau.reverte@eurecat.org">Pau Reverté</maintainer>
+  <license>GPLv3</license>
 
   <depend>std_msgs</depend>
 

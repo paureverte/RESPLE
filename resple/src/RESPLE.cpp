@@ -21,8 +21,6 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/io/pcd_io.h>
-#include "livox_interfaces/msg/custom_msg.hpp"
-#include "livox_ros_driver/msg/custom_msg.hpp"
 #include "livox_ros_driver2/msg/custom_msg.hpp"
 #include "estimate_msgs/msg/calib.hpp"
 #include "estimate_msgs/msg/spline.hpp"
@@ -76,15 +74,9 @@ public:
             if (!lidar.type.compare("Ouster")) {
                 sub_ouster = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
                         lidar.topic, 200000, std::bind(&RESPLE::ousterLidarCallback<ouster_ros::Point>, this, std::placeholders::_1));
-            } else if (!lidar.type.compare("Mid70Avia")) {
-                sub_livox = nh->create_subscription<livox_ros_driver::msg::CustomMsg>(
-                        lidar.topic, 200000, std::bind(&RESPLE::livoxLidarCallback, this, std::placeholders::_1));
             } else if (!lidar.type.compare("LivoxCustomMsg")) {
                 sub_livox2 = nh->create_subscription<livox_ros_driver2::msg::CustomMsg>(
                         lidar.topic, 200000, std::bind(&RESPLE::livoxLidar2Callback, this, std::placeholders::_1));
-            } else if (!lidar.type.compare("AviaResple")) {
-                sub_livox_avia = nh->create_subscription<livox_interfaces::msg::CustomMsg>(
-                        lidar.topic, 200000, std::bind(&RESPLE::livoxAVIACallback, this, std::placeholders::_1));
             } else if (!lidar.type.compare("Hesai")) {
                 sub_hesai = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
                         lidar.topic, 200000, std::bind(&RESPLE::hesaiLidarCallback, this, std::placeholders::_1));
@@ -214,9 +206,7 @@ private:
     std::string pcd_save_path;
     std::mutex mtx_map;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_ouster;
-    rclcpp::Subscription<livox_ros_driver::msg::CustomMsg>::SharedPtr sub_livox;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_livox2;
-    rclcpp::Subscription<livox_interfaces::msg::CustomMsg>::SharedPtr sub_livox_avia;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_hesai;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_livox_mid360;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cur_scan;
@@ -456,53 +446,6 @@ private:
         last_t_ns = time_begin + max_ofs_ns;
     }    
 
-    void livoxLidarCallback(const livox_ros_driver::msg::CustomMsg::SharedPtr livox_msg_in)
-    {
-        std::string name = "Mid70Avia";
-        const LidarConfig& lidar = lidars.at(name);   
-        pcl::PointCloud<pcl::PointXYZINormal>::Ptr pc_last(new pcl::PointCloud<pcl::PointXYZINormal>());     
-        int plsize = livox_msg_in->point_num;
-        if (plsize == 0) return;
-        pc_last->reserve(plsize);
-        int64_t time_begin = rclcpp::Time(livox_msg_in->header.stamp).nanoseconds();
-        static int64_t last_t_ns = time_begin;
-        int64_t max_ofs_ns = 0;
-        int valid_point_num = 0;
-        pcl::PointXYZINormal pt_pre;
-        pt_pre.x = livox_msg_in->points[0].x;
-        pt_pre.y = livox_msg_in->points[0].y;
-        pt_pre.z = livox_msg_in->points[0].z;
-        int N_SCAN_LINES = lidar.scan_line;
-        float blind = lidar.blind;        
-        for (int i = 1; i < plsize; ++i) {
-            if ((livox_msg_in->points[i].line < N_SCAN_LINES) && ((livox_msg_in->points[i].tag & 0x30) == 0x10 || (livox_msg_in->points[i].tag & 0x30) == 0x00)) {
-                valid_point_num++;
-                if (valid_point_num % point_filter_num == 0) {
-                    pcl::PointXYZINormal pt;
-                    pt.x = livox_msg_in->points[i].x;
-                    pt.y = livox_msg_in->points[i].y;
-                    pt.z = livox_msg_in->points[i].z;
-                    pt.intensity = float (livox_msg_in->points[i].offset_time) / float (1e6); // unit: ms
-                    pt.curvature = livox_msg_in->points[i].reflectivity;
-                    if (pt.intensity >= 0 && ((abs(pt.x - pt_pre.x) > 1e-7) || (abs(pt.y - pt_pre.y) > 1e-7) || (abs(pt.z - pt_pre.z) > 1e-7))
-                                            && pt.x*pt.x+pt.y*pt.y+pt.z*pt.z > (blind * blind)&& livox_msg_in->points[i].offset_time + time_begin > last_t_ns) {
-                        int64_t ofs = livox_msg_in->points[i].offset_time;
-                        max_ofs_ns = max_ofs_ns > ofs ? max_ofs_ns : ofs;
-                        pc_last->points.push_back(pt);
-                    }
-                    pt_pre = pt;
-                }
-
-            } 
-        }
-        LidarData& lidar_buffs = lidars_data.at(name);
-        lidar_buffs.mtx_pc.lock();
-        lidar_buffs.pc_buff.push_back(pc_last->points);
-        lidar_buffs.t_buff.push_back(time_begin);
-        lidar_buffs.mtx_pc.unlock();
-        last_t_ns = time_begin + max_ofs_ns;
-    }    
-
     void livoxLidar2Callback(const livox_ros_driver2::msg::CustomMsg::SharedPtr livox_msg_in)
     {
         std::string name = "LivoxCustomMsg";
@@ -548,53 +491,6 @@ private:
         lidar_buffs.mtx_pc.unlock();        
         last_t_ns = time_begin + max_ofs_ns;
     }
-
-     void livoxAVIACallback(const livox_interfaces::msg::CustomMsg::SharedPtr livox_msg_in)
-     {
-        std::string name = "AviaResple";
-        const LidarConfig& lidar = lidars.at(name);       
-        pcl::PointCloud<pcl::PointXYZINormal>::Ptr pc_last(new pcl::PointCloud<pcl::PointXYZINormal>());      
-        int plsize = livox_msg_in->point_num;
-        if (plsize == 0) return;
-        pc_last->reserve(plsize);
-        int64_t time_begin = rclcpp::Time(livox_msg_in->header.stamp).nanoseconds();
-        static int64_t last_t_ns = time_begin;
-        int64_t max_ofs_ns = 0;
-        int valid_point_num = 0;
-        pcl::PointXYZINormal pt_pre;
-        pt_pre.x = livox_msg_in->points[0].x;
-        pt_pre.y = livox_msg_in->points[0].y;
-        pt_pre.z = livox_msg_in->points[0].z;
-        int N_SCAN_LINES = lidar.scan_line;
-        float blind = lidar.blind;           
-        for (int i = 1; i < plsize; ++i) {
-            if ((livox_msg_in->points[i].line < N_SCAN_LINES) && ((livox_msg_in->points[i].tag & 0x30) == 0x10 || (livox_msg_in->points[i].tag & 0x30) == 0x00) && livox_msg_in->points[i].offset_time + time_begin > last_t_ns) {
-                valid_point_num++;
-                if (valid_point_num % point_filter_num == 0) {
-                    pcl::PointXYZINormal pt;
-                    pt.x = livox_msg_in->points[i].x;
-                    pt.y = livox_msg_in->points[i].y;
-                    pt.z = livox_msg_in->points[i].z;
-                    pt.intensity = float (livox_msg_in->points[i].offset_time) / float (1e6); 
-                    pt.curvature = livox_msg_in->points[i].reflectivity;
-                    if (pt.intensity >= 0 && ((abs(pt.x - pt_pre.x) > 1e-7) || (abs(pt.y - pt_pre.y) > 1e-7) ||
-                                            (abs(pt.z - pt_pre.z) > 1e-7))
-                                            && pt.x*pt.x+pt.y*pt.y+pt.z*pt.z > (blind * blind)) {
-                        int64_t ofs = livox_msg_in->points[i].offset_time;
-                        max_ofs_ns = max_ofs_ns > ofs ? max_ofs_ns : ofs;
-                        pc_last->points.push_back(pt);
-                    }
-                    pt_pre = pt;
-                }
-            }
-        }
-        LidarData& lidar_buffs = lidars_data.at(name);
-        lidar_buffs.mtx_pc.lock();
-        lidar_buffs.pc_buff.push_back(pc_last->points);
-        lidar_buffs.t_buff.push_back(time_begin);
-        lidar_buffs.mtx_pc.unlock();
-        last_t_ns = time_begin + max_ofs_ns;
-     }        
 
     void hesaiLidarCallback(const sensor_msgs::msg::PointCloud2::SharedPtr hesai_msg_in)
 	{

@@ -19,9 +19,7 @@
 #include <tf2/exceptions.h>
 #include <rclcpp/service.hpp>
 #include <std_srvs/srv/empty.hpp>
-#include "livox_ros_driver/msg/custom_msg.hpp"
 #include "livox_ros_driver2/msg/custom_msg.hpp"
-#include "livox_interfaces/msg/custom_msg.hpp"
 #include "estimate_msgs/msg/calib.hpp"
 #include "estimate_msgs/msg/estimate.hpp"
 #include "SplineState.h"
@@ -175,51 +173,6 @@ class OusterBuff : public MappingBase<pcl::PointXYZINormal>
     int64_t time_offset = 0;
 };
 
-class Mid70AviaBuff : public MappingBase<pcl::PointXYZINormal>
-{
-  public:
-  Mid70AviaBuff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
-    {
-        pc_subscription_livox = nh->create_subscription<livox_ros_driver::msg::CustomMsg>(
-            this->lidar.topic, 100, std::bind(&Mid70AviaBuff::livoxLidarCallback, this, std::placeholders::_1));
-    }
-
-    void livoxLidarCallback(const livox_ros_driver::msg::CustomMsg::SharedPtr livox_msg_in)
-    {
-        this->pc_last->clear();
-        int plsize = livox_msg_in->point_num;
-        if (plsize == 0) return;
-        this->pc_last->reserve(plsize);
-        pcl::PointXYZINormal pt;
-        for (int i = 1; i < plsize; i++) {
-            if ((livox_msg_in->points[i].tag & 0x30) == 0x10 || (livox_msg_in->points[i].tag & 0x30) == 0x00) {
-                pt.x = livox_msg_in->points[i].x;
-                pt.y = livox_msg_in->points[i].y;
-                pt.z = livox_msg_in->points[i].z;
-                pt.intensity = float (livox_msg_in->points[i].offset_time) / float (1e6); // unit: ms         
-                pt.curvature = livox_msg_in->points[i].reflectivity;
-                pc_last->points.push_back(pt);
-            }
-        }
-        this->pc_last->header.frame_id = this->frame_id;
-        this->pc_last->header.stamp = rclcpp::Time(livox_msg_in->header.stamp).nanoseconds();
-        std::vector<int> indices;
-        pcl::removeNaNFromPointCloud(*this->pc_last, *this->pc_last, indices);
-        if (this->pc_last->points.empty()) return;
-        ds_filter_each_scan.setInputCloud(pc_last);
-        this->pc_last_ds->clear();
-        ds_filter_each_scan.filter(*this->pc_last_ds);
-        pc_last_ds->header.frame_id = this->frame_id;
-        pc_last_ds->header.stamp = rclcpp::Time(livox_msg_in->header.stamp).nanoseconds();
-        mtx.lock();
-        this->pc_L_buff.push_back(*pc_last_ds);
-        mtx.unlock();
-    }
-
-  private:
-    rclcpp::Subscription<livox_ros_driver::msg::CustomMsg>::SharedPtr pc_subscription_livox;
-};
-
 class LivoxCustomMsgBuff : public MappingBase<pcl::PointXYZINormal>
 {
 public:
@@ -263,51 +216,6 @@ public:
 
   private:
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr pc_subscription_livox;
-};
-
-class AviaRespleBuff : public MappingBase<pcl::PointXYZINormal>
-{
-public:
-    AviaRespleBuff(rclcpp::Node::SharedPtr &nh, const LidarConfig& lidar_config) : MappingBase<pcl::PointXYZINormal>(nh, lidar_config)
-    {
-        pc_subscription_livox = nh->create_subscription<livox_interfaces::msg::CustomMsg>(
-            this->lidar.topic, 100, std::bind(&AviaRespleBuff::livoxLidarCallback, this, std::placeholders::_1));
-    }
-
-    void livoxLidarCallback(livox_interfaces::msg::CustomMsg::SharedPtr livox_msg_in)
-    {
-        this->pc_last->clear();
-        int plsize = livox_msg_in->point_num;
-        if (plsize == 0) return;
-        this->pc_last->reserve(plsize);
-        pcl::PointXYZINormal pt;
-        for (int i = 1; i < plsize; i++) {
-            if ((livox_msg_in->points[i].tag & 0x30) == 0x10 || (livox_msg_in->points[i].tag & 0x30) == 0x00) {
-                pt.x = livox_msg_in->points[i].x;
-                pt.y = livox_msg_in->points[i].y;
-                pt.z = livox_msg_in->points[i].z;
-                pt.intensity = float (livox_msg_in->points[i].offset_time) / float (1e6); // unit: ms         
-                pt.curvature = livox_msg_in->points[i].reflectivity;
-                pc_last->points.push_back(pt);
-            }
-        }
-        this->pc_last->header.frame_id = this->frame_id;
-        this->pc_last->header.stamp = rclcpp::Time(livox_msg_in->header.stamp).nanoseconds();
-        std::vector<int> indices;
-        pcl::removeNaNFromPointCloud(*this->pc_last, *this->pc_last, indices);
-        if (this->pc_last->points.empty()) return;
-        ds_filter_each_scan.setInputCloud(pc_last);
-        this->pc_last_ds->clear();
-        ds_filter_each_scan.filter(*this->pc_last_ds);
-        pc_last_ds->header.frame_id = this->frame_id;
-        pc_last_ds->header.stamp = rclcpp::Time(livox_msg_in->header.stamp).nanoseconds();
-        mtx.lock();
-        this->pc_L_buff.push_back(*pc_last_ds);
-        mtx.unlock();
-    }
-
-  private:
-    rclcpp::Subscription<livox_interfaces::msg::CustomMsg>::SharedPtr pc_subscription_livox;
 };
 
 class HesaiBuff : public MappingBase<pcl::PointXYZINormal>
@@ -689,12 +597,8 @@ int main(int argc, char** argv) {
     for (const auto& lidar : lidars) {
         if (!lidar.type.compare("Ouster")) {
             buffs.push_back(new OusterBuff(nh, lidar));
-        } else if (!lidar.type.compare("Mid70Avia")) {
-            buffs.push_back(new Mid70AviaBuff(nh, lidar));
         } else if (!lidar.type.compare("LivoxCustomMsg")) {
             buffs.push_back(new LivoxCustomMsgBuff(nh, lidar));
-        } else if (!lidar.type.compare("AviaResple")) {
-            buffs.push_back(new AviaRespleBuff(nh, lidar));
         } else if (!lidar.type.compare("Hesai")) {
             buffs.push_back(new HesaiBuff(nh, lidar));
         } else if (!lidar.type.compare("Mid360")) {

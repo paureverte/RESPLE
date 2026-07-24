@@ -14,8 +14,6 @@ find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
-find_package(livox_interfaces REQUIRED)
-find_package(livox_ros_driver REQUIRED)
 find_package(livox_ros_driver2 REQUIRED)
 find_package(estimate_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -49,8 +47,6 @@ add_executable(MapSaving src/MapSaving.cpp)
 	sensor_msgs
 	visualization_msgs
 	std_srvs
-	livox_interfaces
-	livox_ros_driver
 	livox_ros_driver2
 	estimate_msgs
 	pcl_conversions
@@ -87,6 +83,6 @@ install(TARGETS Mapping
   DESTINATION lib/${PROJECT_NAME})
 install(TARGETS MapSaving
   DESTINATION lib/${PROJECT_NAME})
-ament_export_dependencies(rclcpp yaml-cpp message_runtime livox_ros_driver livox_ros_driver2 livox_interfaces)
+ament_export_dependencies(rclcpp yaml-cpp message_runtime livox_ros_driver2)
 ament_export_libraries(${PROJECT_NAME})
 ament_package()
