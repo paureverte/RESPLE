@@ -642,8 +642,8 @@ private:
         cub_needrm.shrink_to_fit();
         Eigen::Vector3d pos_lidar_min(std::numeric_limits<double>::max(), std::numeric_limits<double>::max(),
             std::numeric_limits<double>::max());
-        Eigen::Vector3d pos_lidar_max(std::numeric_limits<double>::min(), std::numeric_limits<double>::min(),
-                std::numeric_limits<double>::min());
+        Eigen::Vector3d pos_lidar_max(std::numeric_limits<double>::lowest(), std::numeric_limits<double>::lowest(),
+                std::numeric_limits<double>::lowest());
         for (const auto& [lidar_name, lidar] : lidars) {
             Eigen::Vector3d pos_lidar = getPositionLiDAR(spline->maxTimeNs(), lidar.t_bl);
             pos_lidar_min = pos_lidar_min.array().min(pos_lidar.array()).matrix();
