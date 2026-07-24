@@ -248,3 +248,5 @@ align_est_gt/
 # CLion build files
 cmake-build-*
 .idea
+
+utils/__pycache__/
