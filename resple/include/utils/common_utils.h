@@ -322,6 +322,38 @@ struct WheelConfig {
     }
 };
 
+// Opt-in startup relocalization against a prior map (see Relocalization.h). When disabled
+// (the default), RESPLE initializes as it always has, from scratch.
+struct RelocConfig {
+    bool enable = false;
+    std::string map_path;
+    bool initial_guess = false;
+    Eigen::Vector3d t0 = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond q0 = Eigen::Quaterniond::Identity();
+    int icp_max_iterations = 50;
+    double icp_max_corr_dist = 1.0;
+    double icp_fitness_threshold = 0.5;
+
+    RelocConfig() = default;
+
+    RelocConfig(rclcpp::Node::SharedPtr& nh) {
+        enable = CommonUtils::readParam<bool>(nh, "relocalization.enable", false);
+        if (!enable) {
+            return;
+        }
+        map_path = CommonUtils::readParam<std::string>(nh, "relocalization.map_path");
+        initial_guess = CommonUtils::readParam<bool>(nh, "relocalization.initial_guess", false);
+        if (initial_guess) {
+            t0 = CommonUtils::readVector3d(nh, "relocalization.t0");
+            std::vector<double> q0_v = CommonUtils::readParam<std::vector<double>>(nh, "relocalization.q0");
+            q0 = Eigen::Quaterniond(q0_v.at(0), q0_v.at(1), q0_v.at(2), q0_v.at(3));
+        }
+        icp_max_iterations = CommonUtils::readParam<int>(nh, "relocalization.icp_max_iterations", 50);
+        icp_max_corr_dist = CommonUtils::readParam<double>(nh, "relocalization.icp_max_corr_dist", 1.0);
+        icp_fitness_threshold = CommonUtils::readParam<double>(nh, "relocalization.icp_fitness_threshold", 0.5);
+    }
+};
+
 struct Parameters {
     Eigen::Vector3d cov_acc;
     Eigen::Vector3d cov_gyro;

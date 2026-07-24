@@ -215,6 +215,32 @@ To view a saved `.pcd` file:
 pcl_viewer /path/to/output.pcd
 ```
 
+## Relocalization
+
+By default RESPLE always initializes from scratch: position `(0,0,0)`, gravity-aligned orientation, and a local map built from the first ~100ms of live points. Enabling `relocalization` instead loads a previously-saved map and, on startup only, refines a coarse initial pose guess against it via ICP — after that one-time step, everything continues exactly as usual (no re-relocalization mid-run; if tracking is lost, restart the node).
+
+This is **local refinement, not place recognition**: it corrects a guess that's already roughly right (a few meters/degrees off), it does not search the whole map for where the sensor might be. A guess that's far from the true pose will simply fail to converge rather than silently converging on the wrong place — the node logs an error and falls back to normal from-scratch initialization for the rest of that run (same as `relocalization.enable: false`), instead of crashing. A failure to *load* `map_path` at all (missing/corrupt file) is treated differently and is fatal, since that's a config problem that won't fix itself on retry.
+
+**Map source.** Use `/save_global_map`'s output (see [Map Saving](#map-saving)), not `/save_map`'s — the latter is bounded/pruned by `mapping.cube_len` and won't represent the wider area you're relocalizing into.
+
+Once loaded, the (downsampled) prior map is published once on `prior_map` (`sensor_msgs/PointCloud2`, transient-local — RViz picks it up even if it connects after startup) and shown by default in `config.rviz`, in gray, so you can see where to click "2D Pose Estimate" when `initial_guess: false`.
+
+**Initial guess**, either:
+- `initial_guess: true` — a fixed `t0`/`q0` in the config, for a repeated start point (e.g. always the same garage/dock).
+- `initial_guess: false` — RViz's built-in "2D Pose Estimate" tool (already wired to `/initialpose` in `config.rviz`, no setup needed): click-drag a rough pose after launch. Note this tool only sets x/y/yaw (z/roll/pitch are always 0) — ICP is relied on to correct the rest, so don't expect a good guess on height/tilt from it alone.
+
+```yaml
+relocalization:
+  enable: true
+  map_path: "/home/user/maps/session_map.pcd"   # /save_global_map output
+  initial_guess: false                          # or true, with t0/q0 below
+  t0: [0.0, 0.0, 0.0]
+  q0: [1.0, 0.0, 0.0, 0.0]                       # w, x, y, z
+  icp_max_iterations: 50
+  icp_max_corr_dist: 1.0                         # max ICP point-pair distance, unit: m
+  icp_fitness_threshold: 0.5                     # reject (fatal-exit) if ICP's fitness exceeds this
+```
+
 ## Contributors
 Ziyu Cao (Email: ziyu.cao@liu.se)
 

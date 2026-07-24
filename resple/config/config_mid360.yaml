@@ -58,6 +58,17 @@
       pcd_save_path: "/tmp/resple_map_mid360.pcd"               # output of the RESPLE /save_map service
       global_pcd_save_path: "/tmp/resple_global_map_mid360.pcd" # output of the MapSaving /save_global_map service
 
+    # ---- Relocalization against a prior map ----
+    relocalization:
+      enable: false
+      map_path: "/tmp/resple_global_map_mid360_custommsg.pcd"  # prestored global map for relocalization, must be in PCD format
+      initial_guess: false      # true: seed from t0/q0 below. false: wait for RViz's "2D Pose Estimate" tool (topic /initialpose, already wired in config.rviz)
+      t0: [0.0, 0.0, 0.0]        # seed position in the map frame, unit: m (only read if initial_guess: true)
+      q0: [1.0, 0.0, 0.0, 0.0]   # seed orientation in the map frame (w, x, y, z)
+      icp_max_iterations: 50
+      icp_max_corr_dist: 1.0     # max point-pair distance considered by ICP, unit: m
+      icp_fitness_threshold: 0.5 # reject the refined pose (fatal-exit) if ICP's fitness score exceeds this
+
     # ---- Wheel odometry (tightly-coupled velocity factor) ----
     wheel_odometry:
       enable: false

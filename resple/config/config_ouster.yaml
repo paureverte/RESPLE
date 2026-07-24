@@ -55,6 +55,35 @@
       pcd_save_path: "/tmp/resple_map_ouster.pcd"               # output of the RESPLE /save_map service
       global_pcd_save_path: "/tmp/resple_global_map_ouster.pcd" # output of the MapSaving /save_global_map service
 
+    # ---- Relocalization against a prior map ----
+    relocalization:
+      enable: false
+      map_path: "/tmp/resple_global_map_ouster.pcd"  # prestored global map for relocalization, must be in PCD format
+      initial_guess: false      # true: seed from t0/q0 below. false: wait for RViz's "2D Pose Estimate" tool (topic /initialpose, already wired in config.rviz)
+      t0: [0.0, 0.0, 0.0]        # seed position in the map frame, unit: m (only read if initial_guess: true)
+      q0: [1.0, 0.0, 0.0, 0.0]   # seed orientation in the map frame (w, x, y, z)
+      icp_max_iterations: 50
+      icp_max_corr_dist: 1.0     # max point-pair distance considered by ICP, unit: m
+      icp_fitness_threshold: 0.5 # reject the refined pose (fatal-exit) if ICP's fitness score exceeds this
+
+    # ---- Wheel odometry (tightly-coupled velocity factor) ----
+    wheel_odometry:
+      enable: false
+      topic_name: "/wheel_odom"
+      topic_type: "nav_msgs/msg/Odometry" # or "geometry_msgs/msg/TwistStamped"
+      use_only_vx: true
+
+      # Transformation from IMU/base (B) to the wheel-odometry frame (O)
+      q_wb: [1.0, 0.0, 0.0, 0.0]
+      t_wb: [0.0, 0.0, 0.0]
+
+      std_vx: 0.05
+      std_vy: 0.02
+      std_vz: 0.02
+
+      max_allowed_residual_vx: 0.5
+      adaptive_covariance_multiplier: 100.0
+
     # ---- target_link (optional) ----
     # An extra world->TF frame you can point anywhere, e.g. your robot's real base_link.
     # frame_id names the published TF child frame; q_target/t_target is the IMU/base(B)->target

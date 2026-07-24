@@ -8,6 +8,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <tf2_ros/transform_broadcaster.h>
@@ -28,6 +29,7 @@
 #include "estimate_msgs/srv/save_map.hpp"
 #include "Estimator.h"
 #include "utils/lidar_adapters.h"
+#include "Relocalization.h"
 
 KD_TREE<pcl::PointXYZINormal> ikdtree;
 
@@ -35,9 +37,38 @@ class RESPLE
 {
 
 public:
-    RESPLE(rclcpp::Node::SharedPtr& nh) 
+    RESPLE(rclcpp::Node::SharedPtr& nh)
     {
         readParameters(nh);
+        if (reloc_cfg.enable) {
+            if (!Relocalization::loadPriorMap(reloc_cfg.map_path, prior_map_cloud)) {
+                RCLCPP_FATAL_STREAM(nh->get_logger(), "Relocalization: failed to load prior map from " << reloc_cfg.map_path);
+                exit(1);
+            }
+            pcl::PointCloud<pcl::PointXYZINormal>::Ptr prior_map_ds(new pcl::PointCloud<pcl::PointXYZINormal>());
+            pcl::VoxelGrid<pcl::PointXYZINormal> ds_filter_prior_map;
+            ds_filter_prior_map.setLeafSize(ds_lm_voxel, ds_lm_voxel, ds_lm_voxel);
+            ds_filter_prior_map.setInputCloud(prior_map_cloud);
+            ds_filter_prior_map.filter(*prior_map_ds);
+            prior_map_cloud = prior_map_ds;
+            // Transient local: published once here, but RViz (or any other late
+            // subscriber, e.g. connecting after launch) still receives it.
+            pub_prior_map = nh->create_publisher<sensor_msgs::msg::PointCloud2>(
+                "prior_map", rclcpp::QoS(1).transient_local());
+            sensor_msgs::msg::PointCloud2 prior_map_msg;
+            pcl::toROSMsg(*prior_map_cloud, prior_map_msg);
+            prior_map_msg.header.frame_id = odom_id;
+            pub_prior_map->publish(prior_map_msg);
+            if (reloc_cfg.initial_guess) {
+                std::lock_guard<std::mutex> lock(m_pose_guess);
+                pose_guess_t = reloc_cfg.t0;
+                pose_guess_q = reloc_cfg.q0;
+                if_have_pose_guess = true;
+            } else {
+                sub_initial_pose = nh->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+                    "/initialpose", 10, std::bind(&RESPLE::getInitialPoseCallback, this, std::placeholders::_1));
+            }
+        }
         if (!if_lidar_only) {
             std::string imu_type = CommonUtils::readParam<std::string>(nh, "imu.topic");
             sub_imu = nh->create_subscription<sensor_msgs::msg::Imu>(imu_type, 2000000, std::bind(&RESPLE::getImuCallback, this, std::placeholders::_1));
@@ -270,6 +301,15 @@ private:
     std::mutex m_wheel_buff;
     rclcpp::Clock wheel_log_clock_{RCL_STEADY_TIME};
 
+    RelocConfig reloc_cfg;
+    pcl::PointCloud<pcl::PointXYZINormal>::Ptr prior_map_cloud;
+    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr sub_initial_pose;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_prior_map;
+    std::mutex m_pose_guess;
+    bool if_have_pose_guess = false;
+    Eigen::Vector3d pose_guess_t;
+    Eigen::Quaterniond pose_guess_q;
+
     bool if_init_filter = false;
     Estimator<24> estimator_lo;
     Estimator<30> estimator_lio;
@@ -309,6 +349,7 @@ private:
         }
 
         wheel_cfg = WheelConfig(nh);
+        reloc_cfg = RelocConfig(nh);
 
         dt_ns = 1e9 / CommonUtils::readParam<int>(nh, "spline.knot_hz");
         double dt_s = double(dt_ns) * 1e-9;
@@ -363,6 +404,12 @@ private:
             RCLCPP_INFO_STREAM(nh->get_logger(), "Wheel odometry: disabled");
         }
         RCLCPP_INFO_STREAM(nh->get_logger(), "Local map: cube_len=" << cube_len << "m ds_lm_voxel=" << ds_lm_voxel << "m");
+        if (reloc_cfg.enable) {
+            RCLCPP_INFO_STREAM(nh->get_logger(), "Relocalization: enabled, map=" << reloc_cfg.map_path
+                       << ", guess=" << (reloc_cfg.initial_guess ? "config t0/q0" : "waiting for /initialpose"));
+        } else {
+            RCLCPP_INFO_STREAM(nh->get_logger(), "Relocalization: disabled");
+        }
         RCLCPP_INFO_STREAM(nh->get_logger(), "==========================================");
     }
 
@@ -413,6 +460,22 @@ private:
         Eigen::Vector3d vel(twist_msg->twist.linear.x, twist_msg->twist.linear.y, twist_msg->twist.linear.z);
         std::lock_guard<std::mutex> lock(m_wheel_buff);
         wheel_buff_.emplace_back(t_ns, vel);
+    }
+
+    // RViz's "2D Pose Estimate" tool (already wired to /initialpose in config.rviz)
+    // publishes here. Only the first message is used (v1 has no hot re-trigger);
+    // it only carries x/y/yaw (z/roll/pitch are always 0) — ICP refines the rest.
+    void getInitialPoseCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
+    {
+        std::lock_guard<std::mutex> lock(m_pose_guess);
+        if (if_have_pose_guess) {
+            return;
+        }
+        pose_guess_t = Eigen::Vector3d(msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z);
+        pose_guess_q = Eigen::Quaterniond(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x,
+            msg->pose.pose.orientation.y, msg->pose.pose.orientation.z);
+        if_have_pose_guess = true;
+        RCLCPP_INFO_STREAM(rclcpp::get_logger(node_name), "Relocalization: received initial pose guess from /initialpose");
     }
 
     // Shared by all 4 LiDAR types (see utils/lidar_adapters.h): Adapter absorbs the
@@ -470,11 +533,36 @@ private:
         pub_cur_scan->publish(laserCloudmsg);
     }   
 
+    // Averages the first ~15 buffered IMU samples up to start_t_ns into a body-frame
+    // gravity vector (magnitude CommonUtils::kGravity), popping consumed samples from
+    // imu_buff same as always. Shared by the non-reloc filter init below (which derives
+    // a gravity-aligned q_WI from it) and initializeFromPriorMap (which instead rotates
+    // it by the ICP-refined orientation, since the prior map's world frame is already
+    // gravity-aligned by construction).
+    Eigen::Vector3d averageGravityBody(int64_t start_t_ns)
+    {
+        Eigen::Vector3d gravity_sum(0, 0, 0);
+        int n_imu;
+        {
+            std::lock_guard<std::mutex> lock(m_buff);
+            int buff_size = imu_buff.size();
+            n_imu = std::min(15, buff_size);
+            for (int i = 0; i < n_imu; i++) {
+                gravity_sum += imu_buff.at(i).accel;
+            }
+            while (!imu_buff.empty() && imu_buff.front().time_ns < start_t_ns) {
+                imu_buff.pop_front();
+            }
+        }
+        gravity_sum /= n_imu;
+        return gravity_sum.normalized() * CommonUtils::kGravity;
+    }
+
     bool initialization()
     {
         if (if_init_filter && if_init_map) {
             return true;
-        } 
+        }
         for (const auto& [lidar_name, lidar_data] : lidars_data) {
             if (lidar_data.pt_buff.empty()) {
                 return false;
@@ -483,32 +571,21 @@ private:
         int64_t start_t_ns = std::numeric_limits<int64_t>::max();
         for (const auto& [lidar_name, lidar_data] : lidars_data) {
             start_t_ns = std::min(start_t_ns, std::max(lidar_data.pt_buff.front().time_ns, int64_t(0)));
-        }        
+        }
+        if (reloc_cfg.enable) {
+            return initializeFromPriorMap(start_t_ns);
+        }
         if (!if_init_filter) {
-            Eigen::Quaterniond q_WI = Eigen::Quaterniond::Identity();   
+            Eigen::Quaterniond q_WI = Eigen::Quaterniond::Identity();
             if (!if_lidar_only) {
-                Eigen::Vector3d gravity_sum(0, 0, 0);
-                int n_imu;
-                {
-                    std::lock_guard<std::mutex> lock(m_buff);
-                    int buff_size = imu_buff.size();
-                    n_imu = std::min(15, buff_size);
-                    for (int i = 0; i < n_imu; i++) {
-                        gravity_sum += imu_buff.at(i).accel;
-                    }
-                    while (!imu_buff.empty() && imu_buff.front().time_ns < start_t_ns) {
-                        imu_buff.pop_front();
-                    }
-                }
-                gravity_sum /= n_imu;
-                Eigen::Vector3d gravity_ave = gravity_sum.normalized() * CommonUtils::kGravity;
+                Eigen::Vector3d gravity_ave = averageGravityBody(start_t_ns);
                 Eigen::Matrix3d R0 = CommonUtils::g2R(gravity_ave);
                 double yaw = CommonUtils::R2ypr(R0).x();
                 R0 = CommonUtils::ypr2R(Eigen::Vector3d{-yaw, 0, 0}) * R0;
                 Eigen::Quaterniond q0(R0);
                 q_WI = Quater::positify(q0);
                 gravity = q_WI * gravity_ave;
-            } 
+            }
             initFilter(start_t_ns, Eigen::Vector3d(0, 0, 0), q_WI);
             if_init_filter = true;            
             std_msgs::msg::Int64 start_time;
@@ -556,11 +633,103 @@ private:
                     lidar_data.pt_buff.pop_front();
                 }
             }            
-            ikdtree.Build(pc_world.points); 
+            ikdtree.Build(pc_world.points);
             pc_world.clear();
             if_init_map = true;
-        }       
-        return false; 
+        }
+        return false;
+    }
+
+    // Relocalization-enabled counterpart to the filter-init/map-build steps above:
+    // waits for a pose guess (config or /initialpose), refines it via ICP against the
+    // loaded prior map, then seeds initFilter/ikdtree from the refined pose/prior map
+    // instead of building from scratch. Same one-shot, "seed everything then return
+    // false" convention as the non-reloc path (next tick's if_init_filter && if_init_map
+    // check returns true).
+    bool initializeFromPriorMap(int64_t start_t_ns)
+    {
+        Eigen::Vector3d t_guess;
+        Eigen::Quaterniond q_guess;
+        {
+            std::lock_guard<std::mutex> lock(m_pose_guess);
+            if (!if_have_pose_guess) {
+                return false;
+            }
+            t_guess = pose_guess_t;
+            q_guess = pose_guess_q;
+        }
+
+        int feats_down_size = 0;
+        for (const auto& [lidar_name, lidar_data] : lidars_data) {
+            for (size_t i = 0; i < lidar_data.pt_buff.size(); i++) {
+                if (lidar_data.pt_buff[i].time_ns < start_t_ns + kInitialMapWindowNs) {
+                    feats_down_size++;
+                } else {
+                    break;
+                }
+            }
+        }
+        if (feats_down_size < 100) {
+            return false;
+        }
+
+        pc_world.clear();
+        pc_world.resize(feats_down_size);
+        int world_i = 0;
+        for (const auto& [lidar_name, lidar_data] : lidars_data) {
+            for (size_t i = 0; i < lidar_data.pt_buff.size(); i++) {
+                if (lidar_data.pt_buff[i].time_ns < start_t_ns + kInitialMapWindowNs) {
+                    Relocalization::pointSensorToBody(lidar_data.pt_buff[i].pt, pc_world.points[world_i],
+                        lidar_data.pt_buff[i].t_bl, lidar_data.pt_buff[i].q_bl);
+                    world_i++;
+                } else {
+                    break;
+                }
+            }
+        }
+        for (auto& [lidar_name, lidar_data] : lidars_data) {
+            while (!lidar_data.pt_buff.empty() && lidar_data.pt_buff.front().time_ns < start_t_ns + kInitialMapWindowNs) {
+                lidar_data.pt_buff.pop_front();
+            }
+        }
+        pcl::PointCloud<pcl::PointXYZINormal>::Ptr source_body(new pcl::PointCloud<pcl::PointXYZINormal>(pc_world));
+        pc_world.clear();
+
+        Eigen::Vector3d t_refined;
+        Eigen::Quaterniond q_refined;
+        double fitness;
+        if (!Relocalization::refineInitialPose(source_body, prior_map_cloud, t_guess, q_guess, reloc_cfg,
+                t_refined, q_refined, fitness)) {
+            RCLCPP_ERROR_STREAM(rclcpp::get_logger(node_name), "Relocalization: ICP failed to converge or fitness ("
+                << fitness << ") exceeded threshold (" << reloc_cfg.icp_fitness_threshold
+                << ") -- falling back to normal from-scratch initialization for the rest of this run");
+            reloc_cfg.enable = false;
+            return false;
+        }
+        RCLCPP_INFO_STREAM(rclcpp::get_logger(node_name), "Relocalization: ICP converged, fitness=" << fitness);
+
+        if (!if_lidar_only) {
+            gravity = q_refined * averageGravityBody(start_t_ns);
+        }
+
+        initFilter(start_t_ns, t_refined, q_refined);
+        if_init_filter = true;
+        std_msgs::msg::Int64 start_time;
+        start_time.data = start_t_ns;
+        pub_start_time->publish(start_time);
+
+        if (if_lidar_only) {
+            estimator_lo.propRCP(start_t_ns);
+        } else {
+            estimator_lio.propRCP(start_t_ns);
+        }
+
+        if (ikdtree.Root_Node == nullptr) {
+            ikdtree.set_downsample_param(ds_lm_voxel);
+        }
+        ikdtree.Build(prior_map_cloud->points);
+        if_init_map = true;
+        return false;
     }
 
     bool collectMeasurements()
